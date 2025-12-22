@@ -1,0 +1,60 @@
+{
+  "users": {
+    "bef44c92-4949-42d8-a616-03df02ec4221": {
+      "id": "bef44c92-4949-42d8-a616-03df02ec4221",
+      "email": "test@kaliun.com",
+      "createdAt": "2025-12-21T19:58:28.188Z"
+    }
+  },
+  "installations": {
+    "test-device-12345": {
+      "id": "test-device-12345",
+      "hostname": "kaliunbox",
+      "claimCode": "CEVV98",
+      "createdAt": "2025-12-21T19:59:47.837Z",
+      "claimedAt": "2025-12-21T20:00:19.454Z",
+      "claimedBy": "bef44c92-4949-42d8-a616-03df02ec4221",
+      "customerName": "Tomer",
+      "customerEmail": "test@kaliun.com",
+      "customerAddress": "",
+      "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpbnN0YWxsYXRpb25faWQiOiJ0ZXN0LWRldmljZS0xMjM0NSIsInR5cGUiOiJhY2Nlc3MiLCJpYXQiOjE3NjYzNDcyNjcsImV4cCI6MTc2Njk1MjA2N30.X5rUWxIQTZubzXUh_9qX1dSXkuzYH-DO2atr8kfYjgE",
+      "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpbnN0YWxsYXRpb25faWQiOiJ0ZXN0LWRldmljZS0xMjM0NSIsInR5cGUiOiJyZWZyZXNoIiwiaWF0IjoxNzY2MzQ3MjY3LCJleHAiOjE3NzQxMjMyNjd9.9mUZIrETgOrNlfUmHmBKwhuP7Eeo5FpJjBpJHTssK6M",
+      "accessExpiresAt": "2025-12-28T20:01:07.719Z",
+      "refreshExpiresAt": "2026-03-21T20:01:07.719Z"
+    }
+  },
+  "healthReports": [],
+  "deviceCodes": {},
+  "sessions": {
+    "293d49f8-3f19-4467-9818-af3ea14985e4": {
+      "userId": "bef44c92-4949-42d8-a616-03df02ec4221",
+      "expiresAt": "2026-01-21T16:31:01.674Z"
+    },
+    "a6b10118-cae7-4c58-b517-f4d040f8c263": {
+      "userId": "bef44c92-4949-42d8-a616-03df02ec4221",
+      "expiresAt": "2026-01-21T16:31:17.678Z"
+    }
+  },
+  "magicLinks": {
+    "ff20ec12-a1f1-44e3-a8d1-9bd082d766e9": {
+      "email": "test@kaliun.com",
+      "expiresAt": "2025-12-21T20:27:28.266Z"
+    },
+    "340afb6b-3cb9-4b19-9f9b-d1d94c60dc44": {
+      "email": "test@kaliun.com",
+      "expiresAt": "2025-12-21T20:36:20.418Z"
+    },
+    "c83c9eda-6ba8-4c70-89cb-d28d5b045e8f": {
+      "email": "test@kaliun.com",
+      "expiresAt": "2025-12-22T16:45:03.516Z"
+    },
+    "fe68744e-c184-4ce6-9df4-574f76638fdb": {
+      "email": "test@kaliun.com",
+      "expiresAt": "2025-12-22T16:45:15.532Z"
+    },
+    "7adec8c9-8817-4d3e-93c0-3d836ab0e370": {
+      "email": "test@kaliun.com",
+      "expiresAt": "2025-12-22T16:45:30.859Z"
+    }
+  }
+}

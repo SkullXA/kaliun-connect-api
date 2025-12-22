@@ -1,0 +1,23 @@
+{
+  "name": "kaliun-connect-api",
+  "version": "1.0.0",
+  "description": "Kaliun Connect API - Device registration, claiming, and OAuth2 for Home Assistant",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "dotenv": "^16.4.1",
+    "cookie-parser": "^1.4.6"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
+
