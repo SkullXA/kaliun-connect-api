@@ -12,7 +12,7 @@ import cookieParser from 'cookie-parser';
 import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
-import { supabase, supabaseAdmin, supabaseUrl, supabaseAnonKey, db } from './db.js';
+import { supabase, supabaseAdmin, supabaseUrl, supabaseAnonKey, db, isLocalDev } from './db.js';
 
 dotenv.config();
 
@@ -83,14 +83,15 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-// Auth middleware - Check Supabase session from cookie
+// Auth middleware - Check session from cookie
 async function requireAuth(req, res, next) {
   console.log('[MIDDLEWARE] requireAuth called for:', req.path);
+  console.log('[MIDDLEWARE] isLocalDev:', isLocalDev);
+  
   const accessToken = req.cookies.sb_access_token;
   const refreshToken = req.cookies.sb_refresh_token;
   
   console.log('[MIDDLEWARE] Has access_token cookie:', !!accessToken);
-  console.log('[MIDDLEWARE] Has refresh_token cookie:', !!refreshToken);
   
   if (!accessToken) {
     console.log('[MIDDLEWARE] No access token, redirecting to login');
@@ -98,7 +99,32 @@ async function requireAuth(req, res, next) {
   }
   
   try {
-    console.log('[MIDDLEWARE] Verifying token with Supabase...');
+    // LOCAL DEV MODE: Use direct DB sessions
+    if (isLocalDev) {
+      console.log('[MIDDLEWARE] Using LOCAL auth (direct DB)...');
+      const session = await db.findSessionByToken(accessToken);
+      
+      if (!session) {
+        console.log('[MIDDLEWARE] No valid session found');
+        res.clearCookie('sb_access_token');
+        return res.redirect('/login');
+      }
+      
+      const user = await db.findUserById(session.user_id);
+      if (!user) {
+        console.log('[MIDDLEWARE] User not found for session');
+        res.clearCookie('sb_access_token');
+        return res.redirect('/login');
+      }
+      
+      console.log('[MIDDLEWARE] LOCAL user authenticated:', user.email);
+      req.user = user;
+      req.supabaseUser = user; // Compat
+      return next();
+    }
+    
+    // PRODUCTION MODE: Use Supabase Auth
+    console.log('[MIDDLEWARE] Using Supabase auth...');
     const { data: { user }, error } = await supabase.auth.getUser(accessToken);
     
     if (error || !user) {
@@ -129,12 +155,7 @@ async function requireAuth(req, res, next) {
     
     // Try to get profile from users table (optional)
     try {
-      const { data: profile } = await supabaseAdmin
-        .from('users')
-        .select('*')
-        .eq('email', user.email)
-        .single();
-      
+      const profile = await db.findUserByEmail(user.email);
       if (profile) {
         console.log('[MIDDLEWARE] User profile loaded from DB');
         req.user = { ...user, ...profile, name: profile.name || user.user_metadata?.name };
@@ -630,6 +651,29 @@ app.post('/auth/register', async (req, res) => {
   }
   
   try {
+    // LOCAL DEV MODE: Create user directly in DB
+    if (isLocalDev) {
+      console.log('[REGISTER] Using LOCAL auth (direct DB)...');
+      
+      // Check if user exists
+      const existing = await db.findUserByEmail(email);
+      if (existing) {
+        return res.redirect('/register?error=Email already registered');
+      }
+      
+      // Create user
+      const user = await db.createUser({ email, password, name });
+      console.log('[REGISTER] Created user:', user.id);
+      
+      // Create session
+      const session = await db.createSession(user.id);
+      console.log('[REGISTER] Created session');
+      
+      res.cookie('sb_access_token', session.token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+      return res.redirect('/installations');
+    }
+    
+    // PRODUCTION: Use Supabase Auth
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
@@ -652,7 +696,7 @@ app.post('/auth/register', async (req, res) => {
     res.redirect('/login?message=Check your email to confirm your account');
   } catch (e) {
     console.error('Register error:', e);
-    res.redirect('/register?error=Registration failed');
+    res.redirect(`/register?error=${encodeURIComponent(e.message || 'Registration failed')}`);
   }
 });
 
@@ -665,6 +709,31 @@ app.post('/auth/login', async (req, res) => {
   }
   
   try {
+    // LOCAL DEV MODE: Check password directly in DB
+    if (isLocalDev) {
+      console.log('[LOGIN] Using LOCAL auth (direct DB)...');
+      
+      const user = await db.findUserByEmail(email);
+      if (!user) {
+        return res.redirect('/login?error=Invalid email or password');
+      }
+      
+      const valid = await db.verifyPassword(user, password);
+      if (!valid) {
+        return res.redirect('/login?error=Invalid email or password');
+      }
+      
+      console.log('[LOGIN] User verified:', user.id);
+      
+      // Create session
+      const session = await db.createSession(user.id);
+      console.log('[LOGIN] Created session');
+      
+      res.cookie('sb_access_token', session.token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+      return res.redirect('/installations');
+    }
+    
+    // PRODUCTION: Use Supabase Auth
     const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password,
@@ -679,7 +748,7 @@ app.post('/auth/login', async (req, res) => {
     res.redirect('/installations');
   } catch (e) {
     console.error('Login error:', e);
-    res.redirect('/login?error=Login failed');
+    res.redirect(`/login?error=${encodeURIComponent(e.message || 'Login failed')}`);
   }
 });
 
@@ -792,7 +861,15 @@ app.post('/auth/token', async (req, res) => {
 
 // GET /logout
 app.get('/logout', async (req, res) => {
-  await supabase.auth.signOut();
+  const token = req.cookies.sb_access_token;
+  
+  if (isLocalDev && token) {
+    // Delete local session
+    await db.deleteSession(token).catch(() => {});
+  } else {
+    await supabase.auth.signOut();
+  }
+  
   res.clearCookie('sb_access_token');
   res.clearCookie('sb_refresh_token');
   res.redirect('/login');
@@ -1119,20 +1196,28 @@ app.get('/settings', requireAuth, async (req, res) => {
 });
 
 app.post('/settings/profile', requireAuth, async (req, res) => {
-  console.log('[SETTINGS] Updating profile for:', req.supabaseUser.email);
+  console.log('[SETTINGS] Updating profile for:', req.user.email);
   console.log('[SETTINGS] New name:', req.body.name);
   
   try {
-    // Update Supabase Auth user metadata
-    const { data, error } = await supabaseAdmin.auth.admin.updateUserById(
-      req.supabaseUser.id,
-      { user_metadata: { name: req.body.name } }
-    );
-    
-    if (error) {
-      console.error('[SETTINGS] Update failed:', error.message);
+    // LOCAL DEV: Update directly in database
+    if (isLocalDev) {
+      await db.updateUser(req.user.id, { name: req.body.name });
+      console.log('[SETTINGS] Profile updated in DB');
     } else {
-      console.log('[SETTINGS] Profile updated successfully');
+      // PRODUCTION: Update Supabase Auth user metadata
+      const { error } = await supabaseAdmin.auth.admin.updateUserById(
+        req.supabaseUser.id,
+        { user_metadata: { name: req.body.name } }
+      );
+      
+      if (error) {
+        console.error('[SETTINGS] Update failed:', error.message);
+      } else {
+        // Also update in users table
+        await db.updateUser(req.user.id, { name: req.body.name }).catch(() => {});
+        console.log('[SETTINGS] Profile updated successfully');
+      }
     }
   } catch (e) {
     console.error('[SETTINGS] Error:', e.message);

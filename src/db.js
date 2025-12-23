@@ -3,9 +3,15 @@
  */
 import { createClient } from '@supabase/supabase-js';
 import pg from 'pg';
+import bcrypt from 'bcrypt';
+import { randomUUID } from 'crypto';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+// Check if we're in local development mode
+const BASE_URL = process.env.BASE_URL || '';
+export const isLocalDev = BASE_URL.includes('localhost') || !process.env.SUPABASE_URL;
 
 // =============================================================================
 // Supabase Auth Client (for OAuth)
@@ -46,11 +52,9 @@ if (!databaseUrl) {
   console.warn('⚠️  DATABASE_URL not set - database queries will fail');
 }
 
-// Railway internal connections don't need SSL
-// For external connections (maglev.proxy.rlwy.net), SSL may be needed
+// Railway PostgreSQL - no SSL needed (neither internal nor proxy)
 const pool = databaseUrl ? new pg.Pool({
   connectionString: databaseUrl,
-  // Try without SSL first, Railway handles security at network level
   ssl: false,
   max: 10,
 }) : null;
@@ -174,6 +178,95 @@ export const db = {
       [installationId, limit]
     );
     return result.rows;
+  },
+
+  // ==========================================================================
+  // User Auth (for local development without Supabase Auth)
+  // ==========================================================================
+  async findUserByEmail(email) {
+    const result = await this.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email.toLowerCase()]
+    );
+    return result.rows[0];
+  },
+
+  async findUserById(userId) {
+    const result = await this.query(
+      'SELECT * FROM users WHERE id = $1',
+      [userId]
+    );
+    return result.rows[0];
+  },
+
+  async createUser({ email, password, name }) {
+    const passwordHash = await bcrypt.hash(password, 10);
+    const result = await this.query(
+      `INSERT INTO users (email, password_hash, name, provider)
+       VALUES ($1, $2, $3, 'email')
+       RETURNING *`,
+      [email.toLowerCase(), passwordHash, name]
+    );
+    return result.rows[0];
+  },
+
+  async verifyPassword(user, password) {
+    if (!user.password_hash) return false;
+    return bcrypt.compare(password, user.password_hash);
+  },
+
+  async updateUser(userId, updates) {
+    const setClauses = [];
+    const values = [];
+    let i = 1;
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        setClauses.push(`${key} = $${i}`);
+        values.push(value);
+        i++;
+      }
+    }
+
+    if (setClauses.length === 0) return null;
+
+    setClauses.push('updated_at = NOW()');
+    values.push(userId);
+
+    const result = await this.query(
+      `UPDATE users SET ${setClauses.join(', ')} WHERE id = $${i} RETURNING *`,
+      values
+    );
+    return result.rows[0];
+  },
+
+  // Sessions
+  async createSession(userId) {
+    const token = randomUUID() + '-' + randomUUID();
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+    const result = await this.query(
+      `INSERT INTO sessions (user_id, token, expires_at)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [userId, token, expiresAt.toISOString()]
+    );
+    return result.rows[0];
+  },
+
+  async findSessionByToken(token) {
+    const result = await this.query(
+      'SELECT * FROM sessions WHERE token = $1 AND expires_at > NOW()',
+      [token]
+    );
+    return result.rows[0];
+  },
+
+  async deleteSession(token) {
+    await this.query('DELETE FROM sessions WHERE token = $1', [token]);
+  },
+
+  async cleanupExpiredSessions() {
+    await this.query('DELETE FROM sessions WHERE expires_at < NOW()');
   },
 };
 
