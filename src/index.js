@@ -1157,20 +1157,31 @@ app.post('/claim/:code', requireAuth, async (req, res) => {
   const { code } = req.params;
   const { customer_name, customer_email, customer_address } = req.body;
 
+  console.log('[CLAIM] Attempting to claim code:', code);
+  console.log('[CLAIM] User ID:', req.user?.id);
+  console.log('[CLAIM] User email:', req.user?.email);
+
   try {
     const installation = await db.findInstallationByClaimCode(code);
+    console.log('[CLAIM] Found installation:', installation?.install_id || 'NOT FOUND');
     
-    if (!installation || installation.claimed_at) {
-      return res.redirect('/claim?error=Invalid');
+    if (!installation) {
+      console.log('[CLAIM] Installation not found for code:', code);
+      return res.redirect('/claim?error=Invalid code');
+    }
+    
+    if (installation.claimed_at) {
+      console.log('[CLAIM] Already claimed at:', installation.claimed_at);
+      return res.redirect('/claim?error=Already claimed');
     }
 
-    await db.claimInstallation(code, req.supabaseUser.id, customer_name, customer_email, customer_address);
+    await db.claimInstallation(code, req.user.id, customer_name, customer_email, customer_address);
 
-    console.log(`[CLAIM] ${installation.install_id} by ${req.user.email}`);
+    console.log(`[CLAIM] Success! ${installation.install_id} claimed by ${req.user.email}`);
     res.redirect('/installations?success=Device claimed!');
   } catch (e) {
-    console.error('[CLAIM] Error:', e.message);
-    res.redirect('/claim?error=Failed');
+    console.error('[CLAIM] Error:', e.message, e.stack);
+    res.redirect(`/claim?error=${encodeURIComponent(e.message || 'Failed')}`);
   }
 });
 
