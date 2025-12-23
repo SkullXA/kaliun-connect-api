@@ -46,9 +46,12 @@ if (!databaseUrl) {
   console.warn('⚠️  DATABASE_URL not set - database queries will fail');
 }
 
+// Railway internal connections don't need SSL
+// For external connections (maglev.proxy.rlwy.net), SSL may be needed
 const pool = databaseUrl ? new pg.Pool({
   connectionString: databaseUrl,
-  ssl: { rejectUnauthorized: false },
+  // Try without SSL first, Railway handles security at network level
+  ssl: false,
   max: 10,
 }) : null;
 
