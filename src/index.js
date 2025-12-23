@@ -12,7 +12,7 @@ import cookieParser from 'cookie-parser';
 import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
-import { supabase, supabaseAdmin, supabaseUrl, supabaseAnonKey } from './db.js';
+import { supabase, supabaseAdmin, supabaseUrl, supabaseAnonKey, db } from './db.js';
 
 dotenv.config();
 
@@ -178,36 +178,27 @@ app.post('/api/v1/installations/register', async (req, res) => {
 
   try {
     // Check if already exists
-    const { data: existing } = await supabaseAdmin
-      .from('installations')
-      .select('claim_code')
-      .eq('install_id', install_id)
-      .single();
+    const existing = await db.findInstallationByInstallId(install_id);
     
     if (existing) {
+      console.log(`[REGISTER] Existing: ${install_id} → ${existing.claim_code}`);
       return res.json({ claim_code: existing.claim_code });
     }
 
     // Create new installation
     const claimCode = generateClaimCode();
-    const { data, error } = await supabaseAdmin
-      .from('installations')
-      .insert({
-        install_id,
-        hostname: hostname || 'kaliunbox',
-        architecture,
-        nixos_version,
-        claim_code: claimCode,
-      })
-      .select()
-      .single();
+    await db.createInstallation({
+      installId: install_id,
+      hostname: hostname || 'kaliunbox',
+      architecture,
+      nixosVersion: nixos_version,
+      claimCode,
+    });
 
-    if (error) throw error;
-
-    console.log(`[REGISTER] ${install_id} → ${claimCode}`);
+    console.log(`[REGISTER] New: ${install_id} → ${claimCode}`);
     res.status(201).json({ claim_code: claimCode });
   } catch (e) {
-    console.error('Register error:', e);
+    console.error('[REGISTER] Error:', e.message);
     res.status(500).json({ error: 'internal_error' });
   }
 });
@@ -218,13 +209,9 @@ app.get('/api/v1/installations/:id/config', async (req, res) => {
   const authHeader = req.headers.authorization;
 
   try {
-    const { data: installation, error } = await supabaseAdmin
-      .from('installations')
-      .select('*')
-      .eq('install_id', id)
-      .single();
+    const installation = await db.findInstallationByInstallId(id);
 
-    if (error || !installation) {
+    if (!installation) {
       return res.status(404).json({ error: 'not_found' });
     }
 
@@ -265,15 +252,12 @@ app.get('/api/v1/installations/:id/config', async (req, res) => {
     const accessToken = generateToken({ installation_id: id, type: 'access' }, ACCESS_TOKEN_LIFETIME);
     const refreshToken = generateToken({ installation_id: id, type: 'refresh' }, REFRESH_TOKEN_LIFETIME);
 
-    await supabaseAdmin
-      .from('installations')
-      .update({
-        access_token: accessToken,
-        refresh_token: refreshToken,
-        access_expires_at: addSeconds(now, ACCESS_TOKEN_LIFETIME),
-        refresh_expires_at: addSeconds(now, REFRESH_TOKEN_LIFETIME),
-      })
-      .eq('install_id', id);
+    await db.updateInstallation(id, {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      access_expires_at: addSeconds(now, ACCESS_TOKEN_LIFETIME),
+      refresh_expires_at: addSeconds(now, REFRESH_TOKEN_LIFETIME),
+    });
 
     console.log(`[CONFIG] Bootstrap for: ${id}`);
 
@@ -307,15 +291,11 @@ app.delete('/api/v1/installations/:id/config', async (req, res) => {
   const { id } = req.params;
 
   try {
-    await supabaseAdmin
-      .from('installations')
-      .update({ config_confirmed: true })
-      .eq('install_id', id);
-
+    await db.updateInstallation(id, { config_confirmed: true });
     console.log(`[CONFIG] Confirmed: ${id}`);
     res.status(204).send();
   } catch (e) {
-    console.error('Config confirm error:', e);
+    console.error('[CONFIG] Confirm error:', e.message);
     res.status(500).json({ error: 'internal_error' });
   }
 });
@@ -334,13 +314,10 @@ app.post('/api/v1/installations/token/refresh', async (req, res) => {
     const now = new Date();
     const newAccessToken = generateToken({ installation_id: payload.installation_id, type: 'access' }, ACCESS_TOKEN_LIFETIME);
 
-    await supabaseAdmin
-      .from('installations')
-      .update({
-        access_token: newAccessToken,
-        access_expires_at: addSeconds(now, ACCESS_TOKEN_LIFETIME),
-      })
-      .eq('install_id', payload.installation_id);
+    await db.updateInstallation(payload.installation_id, {
+      access_token: newAccessToken,
+      access_expires_at: addSeconds(now, ACCESS_TOKEN_LIFETIME),
+    });
 
     console.log(`[TOKEN] Refreshed: ${payload.installation_id}`);
     res.json({
@@ -348,7 +325,7 @@ app.post('/api/v1/installations/token/refresh', async (req, res) => {
       access_expires_at: addSeconds(now, ACCESS_TOKEN_LIFETIME),
     });
   } catch (e) {
-    console.error('Token refresh error:', e);
+    console.error('[TOKEN] Refresh error:', e.message);
     res.status(500).json({ error: 'internal_error' });
   }
 });
@@ -361,38 +338,25 @@ app.post('/api/v1/installations/:id/health', requireBearerAuth, async (req, res)
   }
 
   try {
-    // Get installation UUID from install_id
-    const { data: installation } = await supabaseAdmin
-      .from('installations')
-      .select('id')
-      .eq('install_id', id)
-      .single();
+    const installation = await db.findInstallationByInstallId(id);
 
     if (!installation) {
       return res.status(404).json({ error: 'not_found' });
     }
 
     // Store health report
-    await supabaseAdmin
-      .from('health_reports')
-      .insert({
-        installation_id: installation.id,
-        data: req.body,
-      });
+    await db.createHealthReport(installation.id, req.body);
 
     // Update installation with latest health
-    await supabaseAdmin
-      .from('installations')
-      .update({
-        last_health_at: new Date().toISOString(),
-        last_health: req.body,
-      })
-      .eq('install_id', id);
+    await db.updateInstallation(id, {
+      last_health_at: new Date().toISOString(),
+      last_health: JSON.stringify(req.body),
+    });
 
     console.log(`[HEALTH] ${id}`);
     res.status(204).send();
   } catch (e) {
-    console.error('Health error:', e);
+    console.error('[HEALTH] Error:', e.message);
     res.status(500).json({ error: 'internal_error' });
   }
 });
@@ -410,30 +374,25 @@ app.post('/api/v1/installations/:id/logs', requireBearerAuth, async (req, res) =
   }
 
   try {
-    const { data: installation } = await supabaseAdmin
-      .from('installations')
-      .select('id')
-      .eq('install_id', id)
-      .single();
+    const installation = await db.findInstallationByInstallId(id);
 
     if (!installation) {
       return res.status(404).json({ error: 'not_found' });
     }
 
     const logEntries = logs.map(log => ({
-      installation_id: installation.id,
       timestamp: log.timestamp || new Date().toISOString(),
       service: log.service || service || 'unknown',
       level: log.level || level || 'info',
       message: typeof log === 'string' ? log : log.message,
     }));
 
-    await supabaseAdmin.from('logs').insert(logEntries);
+    await db.createLogs(installation.id, logEntries);
 
     console.log(`[LOGS] ${id}: ${logs.length} entries`);
     res.status(204).send();
   } catch (e) {
-    console.error('Logs error:', e);
+    console.error('[LOGS] Error:', e.message);
     res.status(500).json({ error: 'internal_error' });
   }
 });
@@ -850,15 +809,9 @@ app.get('/installations', requireAuth, async (req, res) => {
   console.log('[INSTALLATIONS] Loading for user:', req.supabaseUser.id);
   
   try {
-    const { data: installations, error } = await supabaseAdmin
-      .from('installations')
-      .select('*')
-      .eq('claimed_by', req.supabaseUser.id)
-      .order('created_at', { ascending: false });
-    
-    console.log('[INSTALLATIONS] Query result:', { count: installations?.length, error: error?.message });
-    
-    if (error) throw error;
+    // Use direct PostgreSQL query
+    const installations = await db.findInstallationsByUserId(req.supabaseUser.id);
+    console.log('[INSTALLATIONS] Found:', installations?.length || 0, 'installations');
 
     const list = installations?.length ? installations.map(i => {
       const isOnline = i.last_health_at && (Date.now() - new Date(i.last_health_at).getTime()) < 10 * 60 * 1000;
@@ -893,27 +846,20 @@ app.get('/installations', requireAuth, async (req, res) => {
 // GET /installations/:id - Detailed dashboard
 app.get('/installations/:id', requireAuth, async (req, res) => {
   try {
-    const { data: installation, error } = await supabaseAdmin
-      .from('installations')
-      .select('*')
-      .eq('install_id', req.params.id)
-      .eq('claimed_by', req.supabaseUser.id)
-      .single();
+    const installation = await db.findInstallationByInstallId(req.params.id);
     
-    if (error || !installation) {
+    // Check ownership
+    if (!installation || installation.claimed_by !== req.supabaseUser.id) {
       return res.redirect('/installations');
     }
     
     const isOnline = installation.last_health_at && (Date.now() - new Date(installation.last_health_at).getTime()) < 10 * 60 * 1000;
-    const health = installation.last_health || {};
+    const health = typeof installation.last_health === 'string' 
+      ? JSON.parse(installation.last_health || '{}') 
+      : (installation.last_health || {});
     
     // Get logs
-    const { data: logs } = await supabaseAdmin
-      .from('logs')
-      .select('*')
-      .eq('installation_id', installation.id)
-      .order('created_at', { ascending: false })
-      .limit(20);
+    const logs = await db.getInstallationLogs(installation.id, 20);
     
     // Calculate metrics
     const uptime = health.uptime_seconds ? 
@@ -1062,13 +1008,9 @@ app.get('/claim/:code', requireAuth, async (req, res) => {
   const { code } = req.params;
 
   try {
-    const { data: installation, error } = await supabaseAdmin
-      .from('installations')
-      .select('*')
-      .eq('claim_code', code)
-      .single();
+    const installation = await db.findInstallationByClaimCode(code);
     
-    if (error || !installation) {
+    if (!installation) {
       return res.send(html('Invalid Code', `
         <div class="card">
           <div class="error">Invalid claim code</div>
@@ -1139,31 +1081,18 @@ app.post('/claim/:code', requireAuth, async (req, res) => {
   const { customer_name, customer_email, customer_address } = req.body;
 
   try {
-    const { data: installation } = await supabaseAdmin
-      .from('installations')
-      .select('*')
-      .eq('claim_code', code)
-      .single();
+    const installation = await db.findInstallationByClaimCode(code);
     
     if (!installation || installation.claimed_at) {
       return res.redirect('/claim?error=Invalid');
     }
 
-    await supabaseAdmin
-      .from('installations')
-      .update({
-        claimed_at: new Date().toISOString(),
-        claimed_by: req.supabaseUser.id,
-        customer_name,
-        customer_email,
-        customer_address: customer_address || '',
-      })
-      .eq('claim_code', code);
+    await db.claimInstallation(code, req.supabaseUser.id, customer_name, customer_email, customer_address);
 
     console.log(`[CLAIM] ${installation.install_id} by ${req.user.email}`);
     res.redirect('/installations?success=Device claimed!');
   } catch (e) {
-    console.error('Claim post error:', e);
+    console.error('[CLAIM] Error:', e.message);
     res.redirect('/claim?error=Failed');
   }
 });

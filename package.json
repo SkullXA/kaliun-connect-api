@@ -16,7 +16,8 @@
     "jsonwebtoken": "^9.0.2",
     "dotenv": "^16.4.1",
     "cookie-parser": "^1.4.6",
-    "@supabase/supabase-js": "^2.39.0"
+    "@supabase/supabase-js": "^2.39.0",
+    "pg": "^8.11.3"
   },
   "engines": {
     "node": ">=18"
