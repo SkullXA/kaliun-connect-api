@@ -150,18 +150,44 @@ async function requireAuth(req, res, next) {
     }
     
     console.log('[MIDDLEWARE] User authenticated:', user.email);
-    req.user = user;
     req.supabaseUser = user;
     
-    // Try to get profile from users table (optional)
+    // SYNC: Ensure Supabase Auth user exists in public.users with SAME ID
+    // This prevents ID mismatch issues between Supabase Auth and our DB
     try {
-      const profile = await db.findUserByEmail(user.email);
-      if (profile) {
-        console.log('[MIDDLEWARE] User profile loaded from DB');
-        req.user = { ...user, ...profile, name: profile.name || user.user_metadata?.name };
+      let profile = await db.findUserById(user.id);
+      
+      if (!profile) {
+        // User doesn't exist with this ID - check by email
+        const existingByEmail = await db.findUserByEmail(user.email);
+        
+        if (existingByEmail && existingByEmail.id !== user.id) {
+          // User exists with different ID - update to match Supabase Auth ID
+          console.log('[MIDDLEWARE] Syncing user ID:', existingByEmail.id, '->', user.id);
+          await db.query(
+            `UPDATE public.users SET id = $1 WHERE email = $2`,
+            [user.id, user.email]
+          );
+          profile = { ...existingByEmail, id: user.id };
+        } else if (!existingByEmail) {
+          // Create new user with Supabase Auth ID
+          console.log('[MIDDLEWARE] Creating user in DB with Supabase Auth ID');
+          await db.query(
+            `INSERT INTO public.users (id, email, name, provider) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO NOTHING`,
+            [user.id, user.email, user.user_metadata?.name || user.email.split('@')[0], 'google']
+          );
+          profile = { id: user.id, email: user.email, name: user.user_metadata?.name };
+        } else {
+          profile = existingByEmail;
+        }
       }
-    } catch (profileErr) {
-      console.log('[MIDDLEWARE] No user profile in DB (OK for OAuth users)');
+      
+      console.log('[MIDDLEWARE] User synced to DB with ID:', user.id);
+      req.user = { ...user, ...profile, name: profile?.name || user.user_metadata?.name };
+    } catch (syncErr) {
+      console.error('[MIDDLEWARE] User sync error:', syncErr.message);
+      req.user = user;
     }
     
     next();
