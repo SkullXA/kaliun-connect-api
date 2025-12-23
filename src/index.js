@@ -699,27 +699,31 @@ app.post('/auth/register', async (req, res) => {
       return res.redirect('/installations');
     }
     
-    // PRODUCTION: Use Supabase Auth
-    const { data, error } = await supabase.auth.signUp({
+    // PRODUCTION: Use Supabase Admin API to create auto-confirmed user
+    const { data, error } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
-      options: {
-        data: { name },
-      },
+      email_confirm: true, // Auto-confirm, no email needed
+      user_metadata: { name },
     });
     
     if (error) {
       return res.redirect(`/register?error=${encodeURIComponent(error.message)}`);
     }
     
-    if (data.session) {
-      res.cookie('sb_access_token', data.session.access_token, { httpOnly: true, maxAge: 3600000 });
-      res.cookie('sb_refresh_token', data.session.refresh_token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
-      return res.redirect('/installations');
+    // Now sign them in to get a session
+    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    
+    if (signInError) {
+      return res.redirect(`/login?error=${encodeURIComponent(signInError.message)}`);
     }
     
-    // Email confirmation required
-    res.redirect('/login?message=Check your email to confirm your account');
+    res.cookie('sb_access_token', signInData.session.access_token, { httpOnly: true, maxAge: 3600000 });
+    res.cookie('sb_refresh_token', signInData.session.refresh_token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+    return res.redirect('/installations');
   } catch (e) {
     console.error('Register error:', e);
     res.redirect(`/register?error=${encodeURIComponent(e.message || 'Registration failed')}`);
