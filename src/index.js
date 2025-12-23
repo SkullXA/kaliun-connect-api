@@ -127,16 +127,20 @@ async function requireAuth(req, res, next) {
     req.user = user;
     req.supabaseUser = user;
     
-    // Get profile
-    const { data: profile } = await supabaseAdmin
-      .from('profiles')
-      .select('*')
-      .eq('id', user.id)
-      .single();
-    
-    if (profile) {
-      console.log('[MIDDLEWARE] Profile loaded');
-      req.user = { ...user, ...profile };
+    // Try to get profile from users table (optional)
+    try {
+      const { data: profile } = await supabaseAdmin
+        .from('users')
+        .select('*')
+        .eq('email', user.email)
+        .single();
+      
+      if (profile) {
+        console.log('[MIDDLEWARE] User profile loaded from DB');
+        req.user = { ...user, ...profile, name: profile.name || user.user_metadata?.name };
+      }
+    } catch (profileErr) {
+      console.log('[MIDDLEWARE] No user profile in DB (OK for OAuth users)');
     }
     
     next();
@@ -843,12 +847,16 @@ app.get('/logout', async (req, res) => {
 app.get('/installations', requireAuth, async (req, res) => {
   const { success } = req.query;
   
+  console.log('[INSTALLATIONS] Loading for user:', req.supabaseUser.id);
+  
   try {
     const { data: installations, error } = await supabaseAdmin
       .from('installations')
       .select('*')
       .eq('claimed_by', req.supabaseUser.id)
       .order('created_at', { ascending: false });
+    
+    console.log('[INSTALLATIONS] Query result:', { count: installations?.length, error: error?.message });
     
     if (error) throw error;
 
@@ -877,8 +885,8 @@ app.get('/installations', requireAuth, async (req, res) => {
       <div class="card" style="padding: 0; overflow: hidden;">${list}</div>
     `, req.user));
   } catch (e) {
-    console.error('Installations error:', e);
-    res.send(html('Error', '<div class="error">Failed to load installations</div>', req.user));
+    console.error('[INSTALLATIONS] Error:', e.message, e);
+    res.send(html('Error', `<div class="error">Failed to load installations: ${e.message}</div>`, req.user));
   }
 });
 
@@ -1182,10 +1190,25 @@ app.get('/settings', requireAuth, async (req, res) => {
 });
 
 app.post('/settings/profile', requireAuth, async (req, res) => {
-  await supabaseAdmin
-    .from('profiles')
-    .update({ name: req.body.name })
-    .eq('id', req.supabaseUser.id);
+  console.log('[SETTINGS] Updating profile for:', req.supabaseUser.email);
+  console.log('[SETTINGS] New name:', req.body.name);
+  
+  try {
+    // Update Supabase Auth user metadata
+    const { data, error } = await supabaseAdmin.auth.admin.updateUserById(
+      req.supabaseUser.id,
+      { user_metadata: { name: req.body.name } }
+    );
+    
+    if (error) {
+      console.error('[SETTINGS] Update failed:', error.message);
+    } else {
+      console.log('[SETTINGS] Profile updated successfully');
+    }
+  } catch (e) {
+    console.error('[SETTINGS] Error:', e.message);
+  }
+  
   res.redirect('/settings');
 });
 
