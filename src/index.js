@@ -85,33 +85,45 @@ function formatBytes(bytes) {
 
 // Auth middleware - Check Supabase session from cookie
 async function requireAuth(req, res, next) {
+  console.log('[MIDDLEWARE] requireAuth called for:', req.path);
   const accessToken = req.cookies.sb_access_token;
   const refreshToken = req.cookies.sb_refresh_token;
   
+  console.log('[MIDDLEWARE] Has access_token cookie:', !!accessToken);
+  console.log('[MIDDLEWARE] Has refresh_token cookie:', !!refreshToken);
+  
   if (!accessToken) {
+    console.log('[MIDDLEWARE] No access token, redirecting to login');
     return res.redirect('/login');
   }
   
   try {
+    console.log('[MIDDLEWARE] Verifying token with Supabase...');
     const { data: { user }, error } = await supabase.auth.getUser(accessToken);
     
     if (error || !user) {
+      console.log('[MIDDLEWARE] Token invalid or no user:', error?.message || 'no user');
       // Try to refresh
       if (refreshToken) {
+        console.log('[MIDDLEWARE] Attempting token refresh...');
         const { data: refreshData, error: refreshError } = await supabase.auth.refreshSession({ refresh_token: refreshToken });
         if (!refreshError && refreshData.session) {
+          console.log('[MIDDLEWARE] Token refreshed successfully');
           res.cookie('sb_access_token', refreshData.session.access_token, { httpOnly: true, maxAge: 3600000 });
           res.cookie('sb_refresh_token', refreshData.session.refresh_token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
           req.user = refreshData.user;
           req.supabaseUser = refreshData.user;
           return next();
         }
+        console.log('[MIDDLEWARE] Token refresh failed:', refreshError?.message);
       }
+      console.log('[MIDDLEWARE] Clearing cookies, redirecting to login');
       res.clearCookie('sb_access_token');
       res.clearCookie('sb_refresh_token');
       return res.redirect('/login');
     }
     
+    console.log('[MIDDLEWARE] User authenticated:', user.email);
     req.user = user;
     req.supabaseUser = user;
     
@@ -123,12 +135,13 @@ async function requireAuth(req, res, next) {
       .single();
     
     if (profile) {
+      console.log('[MIDDLEWARE] Profile loaded');
       req.user = { ...user, ...profile };
     }
     
     next();
   } catch (e) {
-    console.error('Auth error:', e);
+    console.error('[MIDDLEWARE] Auth error:', e);
     return res.redirect('/login');
   }
 }
@@ -538,6 +551,39 @@ const html = (title, content, user = null) => `
 app.get('/login', (req, res) => {
   const { error, message } = req.query;
   res.send(html('Login', `
+    <script>
+      // Handle OAuth tokens in URL fragment
+      console.log('[CLIENT] Checking URL hash...');
+      console.log('[CLIENT] Hash:', window.location.hash ? 'present' : 'empty');
+      if (window.location.hash) {
+        const params = new URLSearchParams(window.location.hash.substring(1));
+        const accessToken = params.get('access_token');
+        const refreshToken = params.get('refresh_token');
+        console.log('[CLIENT] access_token:', accessToken ? 'found' : 'not found');
+        console.log('[CLIENT] refresh_token:', refreshToken ? 'found' : 'not found');
+        if (accessToken) {
+          console.log('[CLIENT] Sending tokens to server...');
+          // Send tokens to server
+          fetch('/auth/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken })
+          }).then(res => {
+            console.log('[CLIENT] Server response:', res.status);
+            if (res.ok) {
+              console.log('[CLIENT] Success! Redirecting to /installations');
+              window.location.href = '/installations';
+            } else {
+              console.error('[CLIENT] Server returned error');
+              window.location.href = '/login?error=Auth failed';
+            }
+          }).catch(err => {
+            console.error('[CLIENT] Fetch error:', err);
+            window.location.href = '/login?error=Auth failed';
+          });
+        }
+      }
+    </script>
     <div class="card">
       <h1>Welcome Back</h1>
       <p>Sign in to your account</p>
@@ -676,6 +722,9 @@ app.post('/auth/login', async (req, res) => {
 
 // GET /auth/google - Redirect to Google OAuth
 app.get('/auth/google', async (req, res) => {
+  console.log('[AUTH] Google OAuth initiated');
+  console.log('[AUTH] Redirect URL:', `${BASE_URL}/auth/callback`);
+  
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
@@ -684,9 +733,11 @@ app.get('/auth/google', async (req, res) => {
   });
   
   if (error) {
+    console.error('[AUTH] Google OAuth error:', error.message);
     return res.redirect(`/login?error=${encodeURIComponent(error.message)}`);
   }
   
+  console.log('[AUTH] Redirecting to:', data.url);
   res.redirect(data.url);
 });
 
@@ -706,27 +757,73 @@ app.get('/auth/github', async (req, res) => {
   res.redirect(data.url);
 });
 
-// GET /auth/callback - OAuth callback
+// GET /auth/callback - OAuth callback (for authorization code flow)
 app.get('/auth/callback', async (req, res) => {
+  console.log('[AUTH] Callback received');
+  console.log('[AUTH] Query params:', req.query);
+  
   const code = req.query.code;
   
   if (!code) {
-    return res.redirect('/login?error=OAuth failed');
+    console.log('[AUTH] No code in callback, redirecting to login (tokens may be in fragment)');
+    // No code, redirect to login (tokens might be in fragment)
+    return res.redirect('/login');
   }
   
   try {
+    console.log('[AUTH] Exchanging code for session...');
     const { data, error } = await supabase.auth.exchangeCodeForSession(code);
     
     if (error) {
+      console.error('[AUTH] Exchange error:', error.message);
       return res.redirect(`/login?error=${encodeURIComponent(error.message)}`);
     }
     
+    console.log('[AUTH] Session obtained, user:', data.user?.email);
     res.cookie('sb_access_token', data.session.access_token, { httpOnly: true, maxAge: 3600000 });
     res.cookie('sb_refresh_token', data.session.refresh_token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
     res.redirect('/installations');
   } catch (e) {
-    console.error('OAuth callback error:', e);
+    console.error('[AUTH] OAuth callback error:', e);
     res.redirect('/login?error=OAuth failed');
+  }
+});
+
+// POST /auth/token - Receive tokens from client-side (implicit flow)
+app.post('/auth/token', async (req, res) => {
+  console.log('[AUTH] Token POST received');
+  console.log('[AUTH] Has access_token:', !!req.body.access_token);
+  console.log('[AUTH] Has refresh_token:', !!req.body.refresh_token);
+  
+  const { access_token, refresh_token } = req.body;
+  
+  if (!access_token) {
+    console.error('[AUTH] No access_token in request');
+    return res.status(400).json({ error: 'access_token required' });
+  }
+  
+  try {
+    console.log('[AUTH] Verifying token with Supabase...');
+    // Verify the token is valid by getting the user
+    const { data: { user }, error } = await supabase.auth.getUser(access_token);
+    
+    if (error || !user) {
+      console.error('[AUTH] Token verification failed:', error?.message || 'No user');
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+    
+    console.log('[AUTH] Token valid, user:', user.email);
+    // Set cookies
+    res.cookie('sb_access_token', access_token, { httpOnly: true, maxAge: 3600000 });
+    if (refresh_token) {
+      res.cookie('sb_refresh_token', refresh_token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+    }
+    
+    console.log('[AUTH] Cookies set, returning success');
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[AUTH] Token error:', e);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
