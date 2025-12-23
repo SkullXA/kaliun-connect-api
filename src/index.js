@@ -1,7 +1,8 @@
 /**
- * Kaliun Connect API
+ * Kaliun Connect API v2
  * 
  * Device registration, claiming, OAuth2 Device Code Flow for Home Assistant
+ * Now powered by Supabase for auth and database
  */
 
 import express from 'express';
@@ -10,15 +11,14 @@ import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
-import fs from 'fs';
-import path from 'path';
 import dotenv from 'dotenv';
+import { supabase, supabaseAdmin, supabaseUrl, supabaseAnonKey } from './db.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 7331;
-const JWT_SECRET = process.env.JWT_SECRET || 'kaliun-dev-secret-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || process.env.AUTH_JWT_SECRET || 'kaliun-dev-secret';
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
 // Token lifetimes
@@ -26,39 +26,10 @@ const ACCESS_TOKEN_LIFETIME = 7 * 24 * 60 * 60; // 7 days
 const REFRESH_TOKEN_LIFETIME = 90 * 24 * 60 * 60; // 90 days
 const DEVICE_CODE_LIFETIME = 900; // 15 minutes
 
-// Simple JSON file-based database
-const DB_PATH = process.env.DATABASE_PATH || './data.json';
-let db = {
-  users: {},
-  installations: {},
-  healthReports: [],
-  deviceCodes: {},
-  sessions: {},
-  magicLinks: {},
-};
-
-// Load DB from file
-function loadDb() {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-    }
-  } catch (e) {
-    console.log('Starting with fresh database');
-  }
-}
-
-// Save DB to file
-function saveDb() {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-}
-
-loadDb();
-
 // Middleware
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
@@ -95,24 +66,74 @@ function addSeconds(date, seconds) {
   return new Date(date.getTime() + seconds * 1000).toISOString();
 }
 
-// Auth middleware
-function requireAuth(req, res, next) {
-  const sessionId = req.cookies.session;
-  if (!sessionId) return res.redirect('/login');
-
-  const session = db.sessions[sessionId];
-  if (!session || new Date(session.expiresAt) < new Date()) {
-    res.clearCookie('session');
-    return res.redirect('/login');
-  }
-
-  const user = db.users[session.userId];
-  if (!user) return res.redirect('/login');
-
-  req.user = user;
-  next();
+function timeAgo(dateStr) {
+  if (!dateStr) return 'Never';
+  const seconds = Math.floor((new Date() - new Date(dateStr)) / 1000);
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes ago`;
+  if (seconds < 86400) return `about ${Math.floor(seconds / 3600)} hours ago`;
+  return `${Math.floor(seconds / 86400)} days ago`;
 }
 
+function formatBytes(bytes) {
+  if (!bytes) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// Auth middleware - Check Supabase session from cookie
+async function requireAuth(req, res, next) {
+  const accessToken = req.cookies.sb_access_token;
+  const refreshToken = req.cookies.sb_refresh_token;
+  
+  if (!accessToken) {
+    return res.redirect('/login');
+  }
+  
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(accessToken);
+    
+    if (error || !user) {
+      // Try to refresh
+      if (refreshToken) {
+        const { data: refreshData, error: refreshError } = await supabase.auth.refreshSession({ refresh_token: refreshToken });
+        if (!refreshError && refreshData.session) {
+          res.cookie('sb_access_token', refreshData.session.access_token, { httpOnly: true, maxAge: 3600000 });
+          res.cookie('sb_refresh_token', refreshData.session.refresh_token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+          req.user = refreshData.user;
+          req.supabaseUser = refreshData.user;
+          return next();
+        }
+      }
+      res.clearCookie('sb_access_token');
+      res.clearCookie('sb_refresh_token');
+      return res.redirect('/login');
+    }
+    
+    req.user = user;
+    req.supabaseUser = user;
+    
+    // Get profile
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('*')
+      .eq('id', user.id)
+      .single();
+    
+    if (profile) {
+      req.user = { ...user, ...profile };
+    }
+    
+    next();
+  } catch (e) {
+    console.error('Auth error:', e);
+    return res.redirect('/login');
+  }
+}
+
+// Bearer auth for device APIs
 function requireBearerAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
@@ -130,121 +151,160 @@ function requireBearerAuth(req, res, next) {
 }
 
 // =============================================================================
-// DEVICE APIs
+// DEVICE APIs (unchanged interface, now uses Supabase DB)
 // =============================================================================
 
 // POST /api/v1/installations/register
-app.post('/api/v1/installations/register', (req, res) => {
-  const { install_id, hostname } = req.body;
+app.post('/api/v1/installations/register', async (req, res) => {
+  const { install_id, hostname, architecture, nixos_version } = req.body;
   if (!install_id) return res.status(400).json({ error: 'install_id is required' });
 
-  if (db.installations[install_id]) {
-    return res.json({ claim_code: db.installations[install_id].claimCode });
+  try {
+    // Check if already exists
+    const { data: existing } = await supabaseAdmin
+      .from('installations')
+      .select('claim_code')
+      .eq('install_id', install_id)
+      .single();
+    
+    if (existing) {
+      return res.json({ claim_code: existing.claim_code });
+    }
+
+    // Create new installation
+    const claimCode = generateClaimCode();
+    const { data, error } = await supabaseAdmin
+      .from('installations')
+      .insert({
+        install_id,
+        hostname: hostname || 'kaliunbox',
+        architecture,
+        nixos_version,
+        claim_code: claimCode,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`[REGISTER] ${install_id} → ${claimCode}`);
+    res.status(201).json({ claim_code: claimCode });
+  } catch (e) {
+    console.error('Register error:', e);
+    res.status(500).json({ error: 'internal_error' });
   }
-
-  const claimCode = generateClaimCode();
-  db.installations[install_id] = {
-    id: install_id,
-    hostname: hostname || 'kaliunbox',
-    claimCode,
-    createdAt: new Date().toISOString(),
-  };
-  saveDb();
-
-  console.log(`[REGISTER] ${install_id} → ${claimCode}`);
-  res.status(201).json({ claim_code: claimCode });
 });
 
 // GET /api/v1/installations/:id/config
-app.get('/api/v1/installations/:id/config', (req, res) => {
+app.get('/api/v1/installations/:id/config', async (req, res) => {
   const { id } = req.params;
   const authHeader = req.headers.authorization;
-  const installation = db.installations[id];
 
-  if (!installation) {
-    return res.status(404).json({ error: 'not_found' });
-  }
+  try {
+    const { data: installation, error } = await supabaseAdmin
+      .from('installations')
+      .select('*')
+      .eq('install_id', id)
+      .single();
 
-  if (!installation.claimedAt) {
-    return res.status(404).json({ error: 'not_claimed' });
-  }
-
-  // If already confirmed, require bearer auth
-  if (installation.configConfirmed && !authHeader) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
-
-  // Verify bearer token if provided
-  if (authHeader?.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
-    const payload = verifyToken(token);
-    if (!payload || payload.installation_id !== id) {
-      return res.status(401).json({ error: 'unauthorized', code: 'TOKEN_EXPIRED' });
+    if (error || !installation) {
+      return res.status(404).json({ error: 'not_found' });
     }
-    // Ongoing sync - return config without new tokens
-    return res.json({
+
+    if (!installation.claimed_at) {
+      return res.status(404).json({ error: 'not_claimed' });
+    }
+
+    // If already confirmed, require bearer auth
+    if (installation.config_confirmed && !authHeader) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    // Verify bearer token if provided
+    if (authHeader?.startsWith('Bearer ')) {
+      const token = authHeader.slice(7);
+      const payload = verifyToken(token);
+      if (!payload || payload.installation_id !== id) {
+        return res.status(401).json({ error: 'unauthorized', code: 'TOKEN_EXPIRED' });
+      }
+      // Ongoing sync - return config without new tokens
+      return res.json({
+        customer: {
+          name: installation.customer_name || '',
+          email: installation.customer_email || '',
+          address: installation.customer_address || '',
+        },
+        pangolin: installation.pangolin_newt_id ? {
+          newt_id: installation.pangolin_newt_id,
+          newt_secret: installation.pangolin_newt_secret,
+          endpoint: installation.pangolin_endpoint,
+          url: installation.pangolin_url,
+        } : null,
+      });
+    }
+
+    // Bootstrap - generate tokens
+    const now = new Date();
+    const accessToken = generateToken({ installation_id: id, type: 'access' }, ACCESS_TOKEN_LIFETIME);
+    const refreshToken = generateToken({ installation_id: id, type: 'refresh' }, REFRESH_TOKEN_LIFETIME);
+
+    await supabaseAdmin
+      .from('installations')
+      .update({
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        access_expires_at: addSeconds(now, ACCESS_TOKEN_LIFETIME),
+        refresh_expires_at: addSeconds(now, REFRESH_TOKEN_LIFETIME),
+      })
+      .eq('install_id', id);
+
+    console.log(`[CONFIG] Bootstrap for: ${id}`);
+
+    res.json({
+      auth: {
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        access_expires_at: addSeconds(now, ACCESS_TOKEN_LIFETIME),
+        refresh_expires_at: addSeconds(now, REFRESH_TOKEN_LIFETIME),
+      },
       customer: {
-        name: installation.customerName || '',
-        email: installation.customerEmail || '',
-        address: installation.customerAddress || '',
+        name: installation.customer_name || '',
+        email: installation.customer_email || '',
+        address: installation.customer_address || '',
       },
-      pangolin: {
-        newt_id: `newt_${id.slice(0, 8)}`,
-        newt_secret: `secret_${randomUUID()}`,
-        endpoint: 'https://pangolin.kaliun.com',
-      },
+      pangolin: installation.pangolin_newt_id ? {
+        newt_id: installation.pangolin_newt_id,
+        newt_secret: installation.pangolin_newt_secret,
+        endpoint: installation.pangolin_endpoint,
+        url: installation.pangolin_url,
+      } : null,
     });
+  } catch (e) {
+    console.error('Config error:', e);
+    res.status(500).json({ error: 'internal_error' });
   }
-
-  // Bootstrap - generate tokens
-  const now = new Date();
-  const accessToken = generateToken({ installation_id: id, type: 'access' }, ACCESS_TOKEN_LIFETIME);
-  const refreshToken = generateToken({ installation_id: id, type: 'refresh' }, REFRESH_TOKEN_LIFETIME);
-
-  installation.accessToken = accessToken;
-  installation.refreshToken = refreshToken;
-  installation.accessExpiresAt = addSeconds(now, ACCESS_TOKEN_LIFETIME);
-  installation.refreshExpiresAt = addSeconds(now, REFRESH_TOKEN_LIFETIME);
-  saveDb();
-
-  console.log(`[CONFIG] Bootstrap for: ${id}`);
-
-  res.json({
-    auth: {
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      access_expires_at: installation.accessExpiresAt,
-      refresh_expires_at: installation.refreshExpiresAt,
-    },
-    customer: {
-      name: installation.customerName || '',
-      email: installation.customerEmail || '',
-      address: installation.customerAddress || '',
-    },
-    pangolin: {
-      newt_id: `newt_${id.slice(0, 8)}`,
-      newt_secret: `secret_${randomUUID()}`,
-      endpoint: 'https://pangolin.kaliun.com',
-    },
-  });
 });
 
 // DELETE /api/v1/installations/:id/config
-app.delete('/api/v1/installations/:id/config', (req, res) => {
+app.delete('/api/v1/installations/:id/config', async (req, res) => {
   const { id } = req.params;
-  const installation = db.installations[id];
 
-  if (!installation) return res.status(404).json({ error: 'not_found' });
+  try {
+    await supabaseAdmin
+      .from('installations')
+      .update({ config_confirmed: true })
+      .eq('install_id', id);
 
-  installation.configConfirmed = true;
-  saveDb();
-
-  console.log(`[CONFIG] Confirmed: ${id}`);
-  res.status(204).send();
+    console.log(`[CONFIG] Confirmed: ${id}`);
+    res.status(204).send();
+  } catch (e) {
+    console.error('Config confirm error:', e);
+    res.status(500).json({ error: 'internal_error' });
+  }
 });
 
 // POST /api/v1/installations/token/refresh
-app.post('/api/v1/installations/token/refresh', (req, res) => {
+app.post('/api/v1/installations/token/refresh', async (req, res) => {
   const { refresh_token } = req.body;
   if (!refresh_token) return res.status(400).json({ error: 'refresh_token is required' });
 
@@ -253,179 +313,196 @@ app.post('/api/v1/installations/token/refresh', (req, res) => {
     return res.status(401).json({ error: 'invalid_grant' });
   }
 
-  const installation = db.installations[payload.installation_id];
-  if (!installation) return res.status(401).json({ error: 'invalid_grant' });
+  try {
+    const now = new Date();
+    const newAccessToken = generateToken({ installation_id: payload.installation_id, type: 'access' }, ACCESS_TOKEN_LIFETIME);
 
-  const now = new Date();
-  const newAccessToken = generateToken({ installation_id: payload.installation_id, type: 'access' }, ACCESS_TOKEN_LIFETIME);
+    await supabaseAdmin
+      .from('installations')
+      .update({
+        access_token: newAccessToken,
+        access_expires_at: addSeconds(now, ACCESS_TOKEN_LIFETIME),
+      })
+      .eq('install_id', payload.installation_id);
 
-  installation.accessToken = newAccessToken;
-  installation.accessExpiresAt = addSeconds(now, ACCESS_TOKEN_LIFETIME);
-  saveDb();
-
-  console.log(`[TOKEN] Refreshed: ${payload.installation_id}`);
-  res.json({
-    access_token: newAccessToken,
-    access_expires_at: installation.accessExpiresAt,
-  });
+    console.log(`[TOKEN] Refreshed: ${payload.installation_id}`);
+    res.json({
+      access_token: newAccessToken,
+      access_expires_at: addSeconds(now, ACCESS_TOKEN_LIFETIME),
+    });
+  } catch (e) {
+    console.error('Token refresh error:', e);
+    res.status(500).json({ error: 'internal_error' });
+  }
 });
 
 // POST /api/v1/installations/:id/health
-app.post('/api/v1/installations/:id/health', requireBearerAuth, (req, res) => {
+app.post('/api/v1/installations/:id/health', requireBearerAuth, async (req, res) => {
   const { id } = req.params;
   if (req.tokenPayload.installation_id !== id) {
     return res.status(403).json({ error: 'forbidden' });
   }
 
-  db.healthReports.push({ installationId: id, data: req.body, createdAt: new Date().toISOString() });
-  if (db.healthReports.length > 1000) db.healthReports = db.healthReports.slice(-500);
-  
-  const installation = db.installations[id];
-  if (installation) installation.lastHealthAt = new Date().toISOString();
-  saveDb();
+  try {
+    // Get installation UUID from install_id
+    const { data: installation } = await supabaseAdmin
+      .from('installations')
+      .select('id')
+      .eq('install_id', id)
+      .single();
 
-  console.log(`[HEALTH] ${id}`);
-  res.status(204).send();
-});
-
-// =============================================================================
-// OAuth2 Device Code Flow
-// =============================================================================
-
-// POST /oauth/device/code
-app.post('/oauth/device/code', (req, res) => {
-  const { client_id, scope } = req.body;
-  if (!client_id) return res.status(400).json({ error: 'invalid_request' });
-
-  const deviceCode = randomUUID();
-  const userCode = generateUserCode();
-
-  db.deviceCodes[deviceCode] = {
-    deviceCode,
-    userCode,
-    clientId: client_id,
-    scope: scope || 'profile',
-    expiresAt: addSeconds(new Date(), DEVICE_CODE_LIFETIME),
-    authorized: false,
-  };
-  saveDb();
-
-  console.log(`[OAUTH] Device code: ${userCode}`);
-
-  res.json({
-    device_code: deviceCode,
-    user_code: userCode,
-    verification_uri: `${BASE_URL}/link`,
-    verification_uri_complete: `${BASE_URL}/link?code=${userCode}`,
-    expires_in: DEVICE_CODE_LIFETIME,
-    interval: 5,
-  });
-});
-
-// POST /oauth/token
-app.post('/oauth/token', (req, res) => {
-  const { grant_type, device_code, refresh_token } = req.body;
-
-  // Handle refresh token
-  if (grant_type === 'refresh_token') {
-    if (!refresh_token) return res.status(400).json({ error: 'invalid_request' });
-
-    const payload = verifyToken(refresh_token);
-    if (!payload || payload.type !== 'oauth_refresh') {
-      return res.status(400).json({ error: 'invalid_grant' });
+    if (!installation) {
+      return res.status(404).json({ error: 'not_found' });
     }
 
-    const user = db.users[payload.user_id];
-    if (!user) return res.status(400).json({ error: 'invalid_grant' });
+    // Store health report
+    await supabaseAdmin
+      .from('health_reports')
+      .insert({
+        installation_id: installation.id,
+        data: req.body,
+      });
 
-    return res.json({
-      access_token: generateToken({ user_id: user.id, type: 'oauth_access' }, 3600),
-      token_type: 'Bearer',
-      expires_in: 3600,
-      refresh_token: generateToken({ user_id: user.id, type: 'oauth_refresh' }, 30 * 24 * 60 * 60),
-      scope: 'profile',
-    });
+    // Update installation with latest health
+    await supabaseAdmin
+      .from('installations')
+      .update({
+        last_health_at: new Date().toISOString(),
+        last_health: req.body,
+      })
+      .eq('install_id', id);
+
+    console.log(`[HEALTH] ${id}`);
+    res.status(204).send();
+  } catch (e) {
+    console.error('Health error:', e);
+    res.status(500).json({ error: 'internal_error' });
   }
-
-  // Handle device code
-  if (grant_type !== 'urn:ietf:params:oauth:grant-type:device_code') {
-    return res.status(400).json({ error: 'unsupported_grant_type' });
-  }
-
-  if (!device_code) return res.status(400).json({ error: 'invalid_request' });
-
-  const dc = db.deviceCodes[device_code];
-  if (!dc) return res.status(400).json({ error: 'invalid_grant' });
-
-  if (new Date(dc.expiresAt) < new Date()) {
-    delete db.deviceCodes[device_code];
-    saveDb();
-    return res.status(400).json({ error: 'expired_token' });
-  }
-
-  if (!dc.authorized || !dc.userId) {
-    return res.status(400).json({ error: 'authorization_pending' });
-  }
-
-  const user = db.users[dc.userId];
-  if (!user) return res.status(400).json({ error: 'invalid_grant' });
-
-  delete db.deviceCodes[device_code];
-  saveDb();
-
-  console.log(`[OAUTH] Token issued: ${user.email}`);
-
-  res.json({
-    access_token: generateToken({ user_id: user.id, type: 'oauth_access' }, 3600),
-    token_type: 'Bearer',
-    expires_in: 3600,
-    refresh_token: generateToken({ user_id: user.id, type: 'oauth_refresh' }, 30 * 24 * 60 * 60),
-    scope: dc.scope || 'profile',
-  });
 });
 
-// GET /oauth/userinfo
-app.get('/oauth/userinfo', requireBearerAuth, (req, res) => {
-  if (req.tokenPayload.type !== 'oauth_access') {
-    return res.status(401).json({ error: 'invalid_token' });
+// POST /api/v1/installations/:id/logs
+app.post('/api/v1/installations/:id/logs', requireBearerAuth, async (req, res) => {
+  const { id } = req.params;
+  if (req.tokenPayload.installation_id !== id) {
+    return res.status(403).json({ error: 'forbidden' });
   }
 
-  const user = db.users[req.tokenPayload.user_id];
-  if (!user) return res.status(401).json({ error: 'invalid_token' });
+  const { logs, service, level } = req.body;
+  if (!logs || !Array.isArray(logs)) {
+    return res.status(400).json({ error: 'logs array required' });
+  }
 
-  res.json({ sub: user.id, name: user.name || user.email, email: user.email });
+  try {
+    const { data: installation } = await supabaseAdmin
+      .from('installations')
+      .select('id')
+      .eq('install_id', id)
+      .single();
+
+    if (!installation) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+
+    const logEntries = logs.map(log => ({
+      installation_id: installation.id,
+      timestamp: log.timestamp || new Date().toISOString(),
+      service: log.service || service || 'unknown',
+      level: log.level || level || 'info',
+      message: typeof log === 'string' ? log : log.message,
+    }));
+
+    await supabaseAdmin.from('logs').insert(logEntries);
+
+    console.log(`[LOGS] ${id}: ${logs.length} entries`);
+    res.status(204).send();
+  } catch (e) {
+    console.error('Logs error:', e);
+    res.status(500).json({ error: 'internal_error' });
+  }
 });
 
 // =============================================================================
-// Web UI
+// Web UI Styles
 // =============================================================================
 
 const styles = `
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #e5e5e5; min-height: 100vh; }
-.container { max-width: 600px; margin: 0 auto; padding: 40px 20px; }
-.logo { font-size: 28px; font-weight: bold; color: #f59e0b; margin-bottom: 40px; text-align: center; }
-.card { background: #1a1a1a; border-radius: 12px; padding: 32px; margin-bottom: 24px; border: 1px solid #333; }
+.container { max-width: 1200px; margin: 0 auto; padding: 40px 20px; }
+.container-narrow { max-width: 500px; }
+.logo { font-size: 28px; font-weight: bold; color: #3b82f6; margin-bottom: 40px; text-align: center; }
+.card { background: #1a1a1a; border-radius: 12px; padding: 24px; margin-bottom: 24px; border: 1px solid #333; }
 h1 { font-size: 24px; margin-bottom: 8px; }
-h1 span { color: #f59e0b; }
-p { color: #888; margin-bottom: 24px; }
+h1 span, h2 span { color: #3b82f6; }
+h2 { font-size: 18px; margin-bottom: 16px; color: #888; }
+h3 { font-size: 14px; color: #666; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+p { color: #888; margin-bottom: 16px; }
 .form-group { margin-bottom: 20px; }
 label { display: block; margin-bottom: 8px; font-size: 14px; color: #999; }
-input[type="text"], input[type="email"] { width: 100%; padding: 12px 16px; border-radius: 8px; background: #0a0a0a; border: 1px solid #333; color: #fff; font-size: 16px; }
-input:focus { outline: none; border-color: #f59e0b; }
-.btn { width: 100%; padding: 14px; border-radius: 8px; border: none; background: #f59e0b; color: #000; font-weight: 600; font-size: 16px; cursor: pointer; }
-.btn:hover { background: #d97706; }
+input[type="text"], input[type="email"], input[type="password"] { width: 100%; padding: 12px 16px; border-radius: 8px; background: #0a0a0a; border: 1px solid #333; color: #fff; font-size: 16px; }
+input:focus { outline: none; border-color: #3b82f6; }
+.btn { display: inline-block; padding: 12px 24px; border-radius: 8px; border: none; background: #3b82f6; color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; text-decoration: none; text-align: center; }
+.btn:hover { background: #2563eb; }
 .btn-secondary { background: #333; color: #fff; }
-.success { background: #166534; padding: 16px; border-radius: 8px; margin-bottom: 24px; }
-.error { background: #991b1b; padding: 16px; border-radius: 8px; margin-bottom: 24px; }
-.code { font-family: monospace; font-size: 32px; letter-spacing: 4px; text-align: center; background: #0a0a0a; padding: 20px; border-radius: 8px; margin: 20px 0; }
-nav { background: #111; border-bottom: 1px solid #333; padding: 16px 24px; }
-nav a { color: #888; text-decoration: none; margin-right: 24px; }
-nav a:hover, nav a.active { color: #f59e0b; }
-.installation { padding: 20px; border-bottom: 1px solid #333; }
-.status { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+.btn-secondary:hover { background: #444; }
+.btn-google { background: #fff; color: #333; border: 1px solid #ddd; display: flex; align-items: center; justify-content: center; gap: 10px; }
+.btn-google:hover { background: #f5f5f5; }
+.btn-github { background: #24292e; }
+.btn-github:hover { background: #1b1f23; }
+.btn-full { width: 100%; }
+.btn-sm { padding: 8px 16px; font-size: 12px; }
+.success { background: #166534; padding: 16px; border-radius: 8px; margin-bottom: 24px; color: #4ade80; }
+.error { background: #991b1b; padding: 16px; border-radius: 8px; margin-bottom: 24px; color: #fca5a5; }
+.divider { display: flex; align-items: center; margin: 24px 0; color: #666; }
+.divider::before, .divider::after { content: ''; flex: 1; border-bottom: 1px solid #333; }
+.divider span { padding: 0 16px; font-size: 12px; text-transform: uppercase; }
+nav { background: #111; border-bottom: 1px solid #333; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+nav .nav-left { display: flex; align-items: center; gap: 24px; }
+nav a { color: #888; text-decoration: none; font-size: 14px; }
+nav a:hover, nav a.active { color: #3b82f6; }
+nav .brand { color: #3b82f6; font-weight: bold; font-size: 18px; }
+.status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }
 .status.online { background: #166534; color: #4ade80; }
 .status.offline { background: #7f1d1d; color: #f87171; }
+.status.pending { background: #78350f; color: #fcd34d; }
+.status::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.installation-item { display: flex; justify-content: space-between; align-items: center; padding: 20px; border-bottom: 1px solid #333; cursor: pointer; transition: background 0.2s; }
+.installation-item:hover { background: #222; }
+.installation-item:last-child { border-bottom: none; }
+.installation-info h4 { font-size: 16px; margin-bottom: 4px; }
+.installation-info p { font-size: 13px; color: #666; margin: 0; }
+.metric { text-align: center; padding: 20px; }
+.metric-value { font-size: 32px; font-weight: bold; color: #fff; margin-bottom: 4px; }
+.metric-label { font-size: 12px; color: #666; text-transform: uppercase; }
+.metric-sub { font-size: 11px; color: #555; margin-top: 4px; }
+.progress { height: 8px; background: #333; border-radius: 4px; overflow: hidden; margin-top: 8px; }
+.progress-bar { height: 100%; border-radius: 4px; }
+.progress-bar.green { background: linear-gradient(90deg, #22c55e, #16a34a); }
+.progress-bar.yellow { background: linear-gradient(90deg, #eab308, #ca8a04); }
+.progress-bar.red { background: linear-gradient(90deg, #ef4444, #dc2626); }
+.progress-bar.blue { background: linear-gradient(90deg, #3b82f6, #2563eb); }
+.service-card { display: flex; align-items: center; gap: 16px; padding: 20px; background: #111; border-radius: 8px; }
+.service-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px; }
+.service-icon.ha { background: #18bcf2; }
+.service-icon.vpn { background: #8b5cf6; }
+.service-info { flex: 1; }
+.service-info h4 { font-size: 14px; margin-bottom: 4px; }
+.service-info p { font-size: 12px; color: #666; margin: 0; }
+.timeline { padding: 0; }
+.timeline-item { display: flex; gap: 16px; padding: 12px 0; position: relative; }
+.timeline-item::before { content: ''; position: absolute; left: 11px; top: 32px; bottom: 0; width: 2px; background: #333; }
+.timeline-item:last-child::before { display: none; }
+.timeline-dot { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
+.timeline-dot.green { background: #166534; color: #4ade80; }
+.timeline-dot.blue { background: #1e3a8a; color: #60a5fa; }
+.two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; }
+@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+.code { font-family: monospace; font-size: 32px; letter-spacing: 4px; text-align: center; background: #0a0a0a; padding: 20px; border-radius: 8px; margin: 20px 0; }
+.log-entry { font-family: monospace; font-size: 12px; padding: 8px 12px; border-bottom: 1px solid #222; }
+.log-entry .time { color: #666; }
+.log-entry .service { color: #3b82f6; }
+.log-entry.error { background: rgba(239, 68, 68, 0.1); }
+.log-entry.warning { background: rgba(234, 179, 8, 0.1); }
 `;
 
 const html = (title, content, user = null) => `
@@ -439,159 +516,499 @@ const html = (title, content, user = null) => `
 </head>
 <body>
   ${user ? `<nav>
-    <a href="/" style="color: #f59e0b; font-weight: bold;">⚡ Kaliun</a>
-    <a href="/project">My Project</a>
-    <a href="/installations">Installations</a>
-    <a href="/settings">Settings</a>
-    <a href="/logout" style="float: right;">Logout</a>
+    <div class="nav-left">
+      <a href="/" class="brand">⚡ Kaliun</a>
+      <a href="/installations">Installations</a>
+      <a href="/settings">Settings</a>
+    </div>
+    <a href="/logout">Logout</a>
   </nav>` : ''}
-  <div class="container">
+  <div class="container ${!user ? 'container-narrow' : ''}">
     ${!user ? '<div class="logo">⚡ Kaliun</div>' : ''}
     ${content}
   </div>
 </body>
 </html>`;
 
+// =============================================================================
+// Auth Routes (Supabase)
+// =============================================================================
+
 // GET /login
 app.get('/login', (req, res) => {
-  const { error, success } = req.query;
+  const { error, message } = req.query;
   res.send(html('Login', `
     <div class="card">
       <h1>Welcome Back</h1>
       <p>Sign in to your account</p>
       ${error ? `<div class="error">${error}</div>` : ''}
-      ${success ? `<div class="success">${success}</div>` : ''}
-      <form action="/auth/magic-link" method="POST">
+      ${message ? `<div class="success">${message}</div>` : ''}
+      
+      <a href="/auth/google" class="btn btn-google btn-full" style="margin-bottom: 12px;">
+        <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/></svg>
+        Continue with Google
+      </a>
+      
+      <a href="/auth/github" class="btn btn-github btn-full" style="margin-bottom: 12px;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        Continue with GitHub
+      </a>
+      
+      <div class="divider"><span>or</span></div>
+      
+      <form action="/auth/login" method="POST">
         <div class="form-group">
           <label>Email</label>
           <input type="email" name="email" required placeholder="you@example.com">
         </div>
-        <button type="submit" class="btn">Send login code</button>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" name="password" required placeholder="••••••••">
+        </div>
+        <button type="submit" class="btn btn-full">Sign In</button>
       </form>
+      <p style="text-align: center; margin-top: 20px;">
+        Don't have an account? <a href="/register" style="color: #3b82f6;">Sign up</a>
+      </p>
     </div>
   `));
 });
 
-// POST /auth/magic-link
-app.post('/auth/magic-link', (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.redirect('/login?error=Email required');
-
-  // Create or get user
-  let user = Object.values(db.users).find(u => u.email === email);
-  if (!user) {
-    const userId = randomUUID();
-    user = { id: userId, email, createdAt: new Date().toISOString() };
-    db.users[userId] = user;
-  }
-
-  // Create magic link
-  const token = randomUUID();
-  db.magicLinks[token] = { email, expiresAt: addSeconds(new Date(), 900) };
-  saveDb();
-
-  // In dev, print link. In prod, send email.
-  const link = `${BASE_URL}/auth/verify?token=${token}`;
-  console.log(`\n[AUTH] Magic link for ${email}:\n${link}\n`);
-
-  res.redirect(`/login?success=Check console for login link`);
-});
-
-// GET /auth/verify
-app.get('/auth/verify', (req, res) => {
-  const { token } = req.query;
-  const ml = db.magicLinks[token];
-
-  if (!ml || new Date(ml.expiresAt) < new Date()) {
-    return res.redirect('/login?error=Invalid or expired link');
-  }
-
-  delete db.magicLinks[token];
-
-  const user = Object.values(db.users).find(u => u.email === ml.email);
-  if (!user) return res.redirect('/login?error=User not found');
-
-  // Create session
-  const sessionId = randomUUID();
-  db.sessions[sessionId] = { userId: user.id, expiresAt: addSeconds(new Date(), 30 * 24 * 60 * 60) };
-  saveDb();
-
-  res.cookie('session', sessionId, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
-  res.redirect('/installations');
-});
-
-// GET /logout
-app.get('/logout', (req, res) => {
-  const sessionId = req.cookies.session;
-  if (sessionId) delete db.sessions[sessionId];
-  saveDb();
-  res.clearCookie('session');
-  res.redirect('/login');
-});
-
-// GET /claim/:code
-app.get('/claim/:code', (req, res) => {
-  const { code } = req.params;
-  const sessionId = req.cookies.session;
-
-  // Find installation by claim code
-  const installation = Object.values(db.installations).find(i => i.claimCode === code);
-  
-  if (!installation) {
-    return res.send(html('Invalid Code', `
-      <div class="card">
-        <div class="error">Invalid claim code</div>
-        <p>The code "${code}" was not found.</p>
-        <a href="/claim" class="btn btn-secondary">Try Again</a>
-      </div>
-    `));
-  }
-
-  if (installation.claimedAt) {
-    return res.send(html('Already Claimed', `
-      <div class="card">
-        <div class="error">Device already claimed</div>
-        <a href="/installations" class="btn">View Installations</a>
-      </div>
-    `));
-  }
-
-  // Check auth
-  let user = null;
-  if (sessionId && db.sessions[sessionId]) {
-    const session = db.sessions[sessionId];
-    if (new Date(session.expiresAt) > new Date()) {
-      user = db.users[session.userId];
-    }
-  }
-
-  if (!user) return res.redirect(`/login?return=/claim/${code}`);
-
-  res.send(html('Claim Device', `
+// GET /register
+app.get('/register', (req, res) => {
+  const { error } = req.query;
+  res.send(html('Register', `
     <div class="card">
-      <h1>Claim Your <span>KaliunBox</span></h1>
-      <p>Enter your information to complete setup</p>
-      <div class="code">${code}</div>
-      <form action="/claim/${code}" method="POST">
+      <h1>Create Account</h1>
+      <p>Sign up to get started</p>
+      ${error ? `<div class="error">${error}</div>` : ''}
+      
+      <a href="/auth/google" class="btn btn-google btn-full" style="margin-bottom: 12px;">
+        <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/></svg>
+        Sign up with Google
+      </a>
+      
+      <div class="divider"><span>or</span></div>
+      
+      <form action="/auth/register" method="POST">
         <div class="form-group">
-          <label>Your Name</label>
-          <input type="text" name="customer_name" required value="${user.name || ''}">
+          <label>Name</label>
+          <input type="text" name="name" required placeholder="Your name">
         </div>
         <div class="form-group">
           <label>Email</label>
-          <input type="email" name="customer_email" required value="${user.email}">
+          <input type="email" name="email" required placeholder="you@example.com">
         </div>
         <div class="form-group">
-          <label>Address (optional)</label>
-          <input type="text" name="customer_address">
+          <label>Password</label>
+          <input type="password" name="password" required placeholder="At least 8 characters" minlength="8">
         </div>
-        <button type="submit" class="btn">Complete Setup</button>
+        <button type="submit" class="btn btn-full">Create Account</button>
       </form>
+      <p style="text-align: center; margin-top: 20px;">
+        Already have an account? <a href="/login" style="color: #3b82f6;">Sign in</a>
+      </p>
     </div>
-  `, user));
+  `));
 });
 
-// GET /claim
+// POST /auth/register
+app.post('/auth/register', async (req, res) => {
+  const { name, email, password } = req.body;
+  
+  if (!name || !email || !password) {
+    return res.redirect('/register?error=All fields required');
+  }
+  
+  try {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { name },
+      },
+    });
+    
+    if (error) {
+      return res.redirect(`/register?error=${encodeURIComponent(error.message)}`);
+    }
+    
+    if (data.session) {
+      res.cookie('sb_access_token', data.session.access_token, { httpOnly: true, maxAge: 3600000 });
+      res.cookie('sb_refresh_token', data.session.refresh_token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+      return res.redirect('/installations');
+    }
+    
+    // Email confirmation required
+    res.redirect('/login?message=Check your email to confirm your account');
+  } catch (e) {
+    console.error('Register error:', e);
+    res.redirect('/register?error=Registration failed');
+  }
+});
+
+// POST /auth/login
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  
+  if (!email || !password) {
+    return res.redirect('/login?error=Email and password required');
+  }
+  
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    
+    if (error) {
+      return res.redirect(`/login?error=${encodeURIComponent(error.message)}`);
+    }
+    
+    res.cookie('sb_access_token', data.session.access_token, { httpOnly: true, maxAge: 3600000 });
+    res.cookie('sb_refresh_token', data.session.refresh_token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+    res.redirect('/installations');
+  } catch (e) {
+    console.error('Login error:', e);
+    res.redirect('/login?error=Login failed');
+  }
+});
+
+// GET /auth/google - Redirect to Google OAuth
+app.get('/auth/google', async (req, res) => {
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: `${BASE_URL}/auth/callback`,
+    },
+  });
+  
+  if (error) {
+    return res.redirect(`/login?error=${encodeURIComponent(error.message)}`);
+  }
+  
+  res.redirect(data.url);
+});
+
+// GET /auth/github - Redirect to GitHub OAuth
+app.get('/auth/github', async (req, res) => {
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: 'github',
+    options: {
+      redirectTo: `${BASE_URL}/auth/callback`,
+    },
+  });
+  
+  if (error) {
+    return res.redirect(`/login?error=${encodeURIComponent(error.message)}`);
+  }
+  
+  res.redirect(data.url);
+});
+
+// GET /auth/callback - OAuth callback
+app.get('/auth/callback', async (req, res) => {
+  const code = req.query.code;
+  
+  if (!code) {
+    return res.redirect('/login?error=OAuth failed');
+  }
+  
+  try {
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+    
+    if (error) {
+      return res.redirect(`/login?error=${encodeURIComponent(error.message)}`);
+    }
+    
+    res.cookie('sb_access_token', data.session.access_token, { httpOnly: true, maxAge: 3600000 });
+    res.cookie('sb_refresh_token', data.session.refresh_token, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+    res.redirect('/installations');
+  } catch (e) {
+    console.error('OAuth callback error:', e);
+    res.redirect('/login?error=OAuth failed');
+  }
+});
+
+// GET /logout
+app.get('/logout', async (req, res) => {
+  await supabase.auth.signOut();
+  res.clearCookie('sb_access_token');
+  res.clearCookie('sb_refresh_token');
+  res.redirect('/login');
+});
+
+// =============================================================================
+// Dashboard Routes
+// =============================================================================
+
+// GET /installations - List all installations
+app.get('/installations', requireAuth, async (req, res) => {
+  const { success } = req.query;
+  
+  try {
+    const { data: installations, error } = await supabaseAdmin
+      .from('installations')
+      .select('*')
+      .eq('claimed_by', req.supabaseUser.id)
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+
+    const list = installations?.length ? installations.map(i => {
+      const isOnline = i.last_health_at && (Date.now() - new Date(i.last_health_at).getTime()) < 10 * 60 * 1000;
+      return `
+        <a href="/installations/${i.install_id}" class="installation-item" style="text-decoration: none; color: inherit;">
+          <div class="installation-info">
+            <h4>${i.customer_name || i.hostname || 'KaliunBox'}</h4>
+            <p>${i.install_id.slice(0, 12)}...</p>
+          </div>
+          <span class="status ${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</span>
+        </a>`;
+    }).join('') : `
+      <div style="text-align: center; padding: 60px 20px; color: #666;">
+        <p style="font-size: 48px; margin-bottom: 16px;">📦</p>
+        <h3 style="color: #888;">No installations yet</h3>
+        <p>Scan a KaliunBox QR code to claim your first device.</p>
+        <a href="/claim" class="btn" style="margin-top: 16px;">Claim a Device</a>
+      </div>`;
+
+    res.send(html('My Installations', `
+      <h1>My <span>Installations</span></h1>
+      <p>View your Kaliun installations</p>
+      ${success ? `<div class="success">${success}</div>` : ''}
+      <div class="card" style="padding: 0; overflow: hidden;">${list}</div>
+    `, req.user));
+  } catch (e) {
+    console.error('Installations error:', e);
+    res.send(html('Error', '<div class="error">Failed to load installations</div>', req.user));
+  }
+});
+
+// GET /installations/:id - Detailed dashboard
+app.get('/installations/:id', requireAuth, async (req, res) => {
+  try {
+    const { data: installation, error } = await supabaseAdmin
+      .from('installations')
+      .select('*')
+      .eq('install_id', req.params.id)
+      .eq('claimed_by', req.supabaseUser.id)
+      .single();
+    
+    if (error || !installation) {
+      return res.redirect('/installations');
+    }
+    
+    const isOnline = installation.last_health_at && (Date.now() - new Date(installation.last_health_at).getTime()) < 10 * 60 * 1000;
+    const health = installation.last_health || {};
+    
+    // Get logs
+    const { data: logs } = await supabaseAdmin
+      .from('logs')
+      .select('*')
+      .eq('installation_id', installation.id)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    
+    // Calculate metrics
+    const uptime = health.uptime_seconds ? 
+      (health.uptime_seconds > 86400 ? `${Math.floor(health.uptime_seconds / 86400)}d ${Math.floor((health.uptime_seconds % 86400) / 3600)}h` :
+       health.uptime_seconds > 3600 ? `${Math.floor(health.uptime_seconds / 3600)}h ${Math.floor((health.uptime_seconds % 3600) / 60)}m` :
+       `${Math.floor(health.uptime_seconds / 60)}m`) : 'Unknown';
+    
+    const memoryPercent = health.memory_total_bytes ? Math.round((health.memory_used_bytes / health.memory_total_bytes) * 100) : 0;
+    const diskPercent = health.disk_total_bytes ? Math.round((health.disk_used_bytes / health.disk_total_bytes) * 100) : 0;
+    
+    const logsHtml = logs?.length ? logs.map(log => `
+      <div class="log-entry ${log.level}">
+        <span class="time">${new Date(log.timestamp).toLocaleTimeString()}</span>
+        <span class="service">[${log.service}]</span>
+        ${log.message}
+      </div>
+    `).join('') : '<p style="padding: 20px; color: #666; text-align: center;">No logs yet</p>';
+
+    res.send(html(`${installation.customer_name || 'KaliunBox'}`, `
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+        <div>
+          <a href="/installations" style="color: #666; text-decoration: none; font-size: 14px;">← Back</a>
+          <h1 style="margin-top: 8px;">${installation.customer_name || 'KaliunBox'}</h1>
+        </div>
+        <span class="status ${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</span>
+      </div>
+      
+      <div class="two-col">
+        <div>
+          <div class="card">
+            <h3>Status</h3>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px;">
+              <div>
+                <div style="color: #666; font-size: 12px;">Status</div>
+                <span class="status ${isOnline ? 'online' : 'offline'}" style="margin-top: 8px;">${isOnline ? 'Online' : 'Offline'}</span>
+              </div>
+              <div>
+                <div style="color: #666; font-size: 12px;">Last Seen</div>
+                <div style="margin-top: 8px;">${timeAgo(installation.last_health_at)}</div>
+              </div>
+              <div>
+                <div style="color: #666; font-size: 12px;">Uptime</div>
+                <div style="margin-top: 8px;">${uptime}</div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="card">
+            <h3>Services</h3>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 16px;">
+              <div class="service-card">
+                <div class="service-icon ha">🏠</div>
+                <div class="service-info">
+                  <h4>Home Assistant</h4>
+                  <p>${health.ha_version || 'Unknown'}</p>
+                </div>
+                <span class="status ${health.ha_status === 'running' ? 'online' : 'offline'}">${health.ha_status === 'running' ? 'Running' : 'Stopped'}</span>
+              </div>
+              <div class="service-card">
+                <div class="service-icon vpn">🔐</div>
+                <div class="service-info">
+                  <h4>Remote Access</h4>
+                  <p>VPN tunnel</p>
+                </div>
+                <span class="status ${health.newt_connected ? 'online' : 'pending'}">${health.newt_connected ? 'Online' : 'Not configured'}</span>
+              </div>
+            </div>
+          </div>
+          
+          <div class="card">
+            <h3>Health</h3>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 16px;">
+              <div>
+                <div style="display: flex; justify-content: space-between; font-size: 13px;">
+                  <span>Memory</span><span>${memoryPercent}%</span>
+                </div>
+                <div class="progress">
+                  <div class="progress-bar ${memoryPercent > 90 ? 'red' : memoryPercent > 70 ? 'yellow' : 'green'}" style="width: ${memoryPercent}%"></div>
+                </div>
+                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(health.memory_used_bytes)} / ${formatBytes(health.memory_total_bytes)}</div>
+              </div>
+              <div>
+                <div style="display: flex; justify-content: space-between; font-size: 13px;">
+                  <span>Disk</span><span>${diskPercent}%</span>
+                </div>
+                <div class="progress">
+                  <div class="progress-bar ${diskPercent > 90 ? 'red' : diskPercent > 70 ? 'yellow' : 'blue'}" style="width: ${diskPercent}%"></div>
+                </div>
+                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(health.disk_used_bytes)} / ${formatBytes(health.disk_total_bytes)}</div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="card">
+            <h3>Logs</h3>
+            <div style="max-height: 300px; overflow-y: auto; margin-top: 16px; background: #111; border-radius: 8px;">
+              ${logsHtml}
+            </div>
+          </div>
+        </div>
+        
+        <div>
+          <div class="card">
+            <h3>Homeowner</h3>
+            <div style="margin-top: 16px;">
+              <div style="color: #666; font-size: 12px;">Name</div>
+              <div style="margin-top: 4px;">${installation.customer_name || 'Not set'}</div>
+            </div>
+            <div style="margin-top: 16px;">
+              <div style="color: #666; font-size: 12px;">Email</div>
+              <div style="margin-top: 4px;">${installation.customer_email || 'Not set'}</div>
+            </div>
+          </div>
+          
+          <div class="card">
+            <h3>System</h3>
+            <div style="margin-top: 16px; font-size: 13px;">
+              <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
+                <span style="color: #666;">Host IP</span>
+                <span>${health.host_ip || 'Unknown'}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
+                <span style="color: #666;">Architecture</span>
+                <span>${installation.architecture || 'x86_64'}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 8px 0;">
+                <span style="color: #666;">NixOS</span>
+                <span>${health.nixos_version || installation.nixos_version || 'Unknown'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `, req.user));
+  } catch (e) {
+    console.error('Installation detail error:', e);
+    res.redirect('/installations');
+  }
+});
+
+// =============================================================================
+// Claim Routes
+// =============================================================================
+
+app.get('/claim/:code', requireAuth, async (req, res) => {
+  const { code } = req.params;
+
+  try {
+    const { data: installation, error } = await supabaseAdmin
+      .from('installations')
+      .select('*')
+      .eq('claim_code', code)
+      .single();
+    
+    if (error || !installation) {
+      return res.send(html('Invalid Code', `
+        <div class="card">
+          <div class="error">Invalid claim code</div>
+          <a href="/claim" class="btn btn-secondary">Try Again</a>
+        </div>
+      `, req.user));
+    }
+
+    if (installation.claimed_at) {
+      return res.send(html('Already Claimed', `
+        <div class="card">
+          <div class="error">Device already claimed</div>
+          <a href="/installations" class="btn">View Installations</a>
+        </div>
+      `, req.user));
+    }
+
+    res.send(html('Claim Device', `
+      <div class="card">
+        <h1>Claim Your <span>KaliunBox</span></h1>
+        <p>Enter your information to complete setup</p>
+        <div class="code">${code}</div>
+        <form action="/claim/${code}" method="POST">
+          <div class="form-group">
+            <label>Your Name</label>
+            <input type="text" name="customer_name" required value="${req.user.name || req.user.email?.split('@')[0] || ''}">
+          </div>
+          <div class="form-group">
+            <label>Email</label>
+            <input type="email" name="customer_email" required value="${req.user.email}">
+          </div>
+          <div class="form-group">
+            <label>Address (optional)</label>
+            <input type="text" name="customer_address">
+          </div>
+          <button type="submit" class="btn btn-full">Complete Setup</button>
+        </form>
+      </div>
+    `, req.user));
+  } catch (e) {
+    console.error('Claim error:', e);
+    res.redirect('/claim');
+  }
+});
+
 app.get('/claim', (req, res) => {
   res.send(html('Claim Device', `
     <div class="card">
@@ -602,165 +1019,57 @@ app.get('/claim', (req, res) => {
           <label>Claim Code</label>
           <input type="text" name="code" required placeholder="ABC123" style="text-transform: uppercase; text-align: center; font-size: 24px;">
         </div>
-        <button type="submit" class="btn">Continue</button>
+        <button type="submit" class="btn btn-full">Continue</button>
       </form>
     </div>
   `));
 });
 
-// POST /claim
 app.post('/claim', (req, res) => {
   res.redirect(`/claim/${req.body.code.toUpperCase()}`);
 });
 
-// POST /claim/:code
-app.post('/claim/:code', requireAuth, (req, res) => {
+app.post('/claim/:code', requireAuth, async (req, res) => {
   const { code } = req.params;
   const { customer_name, customer_email, customer_address } = req.body;
 
-  const installation = Object.values(db.installations).find(i => i.claimCode === code);
-  if (!installation || installation.claimedAt) {
-    return res.redirect('/claim?error=Invalid');
-  }
-
-  installation.claimedAt = new Date().toISOString();
-  installation.claimedBy = req.user.id;
-  installation.customerName = customer_name;
-  installation.customerEmail = customer_email;
-  installation.customerAddress = customer_address || '';
-  saveDb();
-
-  console.log(`[CLAIM] ${installation.id} by ${req.user.email}`);
-  res.redirect('/installations?success=Device claimed!');
-});
-
-// GET /installations
-app.get('/installations', requireAuth, (req, res) => {
-  const { success } = req.query;
-  const myInstallations = Object.values(db.installations).filter(i => i.claimedBy === req.user.id);
-
-  const list = myInstallations.length ? myInstallations.map(i => {
-    const lastSeen = i.lastHealthAt ? new Date(i.lastHealthAt) : null;
-    const isOnline = lastSeen && (Date.now() - lastSeen.getTime()) < 30 * 60 * 1000;
-    return `<div class="installation">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-          <strong>${i.customerName || i.hostname || 'KaliunBox'}</strong>
-          <div style="color: #666; font-size: 14px;">${i.id.slice(0, 8)}...</div>
-        </div>
-        <span class="status ${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</span>
-      </div>
-    </div>`;
-  }).join('') : `<div style="text-align: center; padding: 60px 20px; color: #666;">
-    <p style="font-size: 48px; margin-bottom: 16px;">📦</p>
-    <h3>No installations yet</h3>
-    <p>Your installations will appear here once set up.</p>
-    <a href="/claim" class="btn" style="display: inline-block; width: auto; padding: 12px 24px; margin-top: 16px;">Claim a Device</a>
-  </div>`;
-
-  res.send(html('My Installations', `
-    <h1 style="margin-bottom: 8px;">My <span style="color: #f59e0b;">Installations</span></h1>
-    <p>View your Kaliun installations</p>
-    ${success ? `<div class="success">${success}</div>` : ''}
-    <div class="card" style="padding: 0;">${list}</div>
-  `, req.user));
-});
-
-// GET /link
-app.get('/link', (req, res) => {
-  const { code } = req.query;
-  const sessionId = req.cookies.session;
-
-  let user = null;
-  if (sessionId && db.sessions[sessionId]) {
-    const session = db.sessions[sessionId];
-    if (new Date(session.expiresAt) > new Date()) {
-      user = db.users[session.userId];
-    }
-  }
-
-  if (!user) return res.redirect(`/login?return=/link${code ? '?code=' + code : ''}`);
-
-  if (code) {
-    const dc = Object.values(db.deviceCodes).find(d => d.userCode === code);
-    if (!dc || new Date(dc.expiresAt) < new Date()) {
-      return res.send(html('Invalid Code', `
-        <div class="card">
-          <div class="error">Invalid or expired code</div>
-          <a href="/link" class="btn btn-secondary">Try Again</a>
-        </div>
-      `, user));
+  try {
+    const { data: installation } = await supabaseAdmin
+      .from('installations')
+      .select('*')
+      .eq('claim_code', code)
+      .single();
+    
+    if (!installation || installation.claimed_at) {
+      return res.redirect('/claim?error=Invalid');
     }
 
-    if (dc.authorized) {
-      return res.send(html('Already Authorized', `
-        <div class="card">
-          <div class="success">✓ Already authorized</div>
-          <p>You can close this window.</p>
-        </div>
-      `, user));
-    }
+    await supabaseAdmin
+      .from('installations')
+      .update({
+        claimed_at: new Date().toISOString(),
+        claimed_by: req.supabaseUser.id,
+        customer_name,
+        customer_email,
+        customer_address: customer_address || '',
+      })
+      .eq('claim_code', code);
 
-    return res.send(html('Link Home Assistant', `
-      <div class="card">
-        <h1>Link <span>Home Assistant</span></h1>
-        <p>Allow Home Assistant to access your Kaliun account?</p>
-        <div class="code">${code}</div>
-        <form action="/link" method="POST">
-          <input type="hidden" name="code" value="${code}">
-          <button type="submit" class="btn">Authorize</button>
-        </form>
-        <a href="/" class="btn btn-secondary" style="margin-top: 12px;">Cancel</a>
-      </div>
-    `, user));
+    console.log(`[CLAIM] ${installation.install_id} by ${req.user.email}`);
+    res.redirect('/installations?success=Device claimed!');
+  } catch (e) {
+    console.error('Claim post error:', e);
+    res.redirect('/claim?error=Failed');
   }
-
-  res.send(html('Link Home Assistant', `
-    <div class="card">
-      <h1>Link <span>Home Assistant</span></h1>
-      <p>Enter the code shown in Home Assistant</p>
-      <form action="/link" method="GET">
-        <div class="form-group">
-          <label>Device Code</label>
-          <input type="text" name="code" required placeholder="XXXX-XXXX" style="text-transform: uppercase; text-align: center; font-size: 24px;">
-        </div>
-        <button type="submit" class="btn">Continue</button>
-      </form>
-    </div>
-  `, user));
 });
 
-// POST /link
-app.post('/link', requireAuth, (req, res) => {
-  const { code } = req.body;
-  const dc = Object.values(db.deviceCodes).find(d => d.userCode === code);
-
-  if (!dc || new Date(dc.expiresAt) < new Date()) {
-    return res.redirect('/link?error=Invalid code');
-  }
-
-  dc.authorized = true;
-  dc.userId = req.user.id;
-  saveDb();
-
-  console.log(`[OAUTH] ${code} authorized by ${req.user.email}`);
-
-  res.send(html('Success', `
+// Settings
+app.get('/settings', requireAuth, async (req, res) => {
+  res.send(html('Settings', `
+    <h1><span>Account</span> Settings</h1>
     <div class="card">
-      <div class="success">✓ Successfully linked!</div>
-      <h1>Home Assistant <span>Connected</span></h1>
-      <p>You can close this window.</p>
-    </div>
-  `, req.user));
-});
-
-// GET /settings
-app.get('/settings', requireAuth, (req, res) => {
-  res.send(html('Account Settings', `
-    <h1 style="margin-bottom: 8px;"><span style="color: #f59e0b;">Account</span> Settings</h1>
-    <p>Manage your account</p>
-    <div class="card">
-      <form action="/settings/profile" method="POST">
+      <h3>Profile</h3>
+      <form action="/settings/profile" method="POST" style="margin-top: 16px;">
         <div class="form-group">
           <label>Name</label>
           <input type="text" name="name" value="${req.user.name || ''}">
@@ -775,56 +1084,35 @@ app.get('/settings', requireAuth, (req, res) => {
   `, req.user));
 });
 
-// POST /settings/profile
-app.post('/settings/profile', requireAuth, (req, res) => {
-  req.user.name = req.body.name;
-  saveDb();
+app.post('/settings/profile', requireAuth, async (req, res) => {
+  await supabaseAdmin
+    .from('profiles')
+    .update({ name: req.body.name })
+    .eq('id', req.supabaseUser.id);
   res.redirect('/settings');
-});
-
-// GET /project
-app.get('/project', requireAuth, (req, res) => {
-  res.send(html('My Project', `
-    <h1 style="text-align: center;">Your <span style="color: #f59e0b;">Smart Home</span> Project</h1>
-    <p style="text-align: center;">Tell us about your project</p>
-    <div class="card">
-      <h3>What type of project is this?</h3>
-      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 16px;">
-        <button class="btn btn-secondary" style="padding: 20px;">🏠<br>New Setup</button>
-        <button class="btn btn-secondary" style="padding: 20px;">🏗️<br>New Build</button>
-        <button class="btn btn-secondary" style="padding: 20px;">🔧<br>Repair</button>
-      </div>
-      <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 12px;">
-        <button class="btn btn-secondary" style="padding: 20px;">➕<br>Upgrade</button>
-        <button class="btn btn-secondary" style="padding: 20px;">•••<br>Other</button>
-      </div>
-      <button class="btn" style="margin-top: 24px;">Save and Continue →</button>
-    </div>
-  `, req.user));
 });
 
 // Root
 app.get('/', (req, res) => {
-  const sessionId = req.cookies.session;
-  if (sessionId && db.sessions[sessionId]) {
-    const session = db.sessions[sessionId];
-    if (new Date(session.expiresAt) > new Date()) {
-      return res.redirect('/installations');
-    }
+  const accessToken = req.cookies.sb_access_token;
+  if (accessToken) {
+    return res.redirect('/installations');
   }
   res.redirect('/login');
 });
 
-// Start
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Start server
 app.listen(PORT, () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
-║  ⚡ Kaliun Connect API                                        ║
+║  ⚡ Kaliun Connect API v2 (Supabase)                          ║
 ║  Server: ${BASE_URL.padEnd(51)}║
-║                                                               ║
-║  Device: POST /api/v1/installations/register                  ║
-║  OAuth:  POST /oauth/device/code                              ║
-║  Web:    GET  /login, /claim, /installations                  ║
+║  Supabase: ${supabaseUrl.padEnd(49)}║
 ╚═══════════════════════════════════════════════════════════════╝
   `);
 });
