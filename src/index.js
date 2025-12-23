@@ -279,18 +279,24 @@ app.get('/api/v1/installations/:id/config', async (req, res) => {
         return res.status(401).json({ error: 'unauthorized', code: 'TOKEN_EXPIRED' });
       }
       // Ongoing sync - return config without new tokens
+      const pangolinSync = installation.pangolin_newt_id ? {
+        newt_id: installation.pangolin_newt_id,
+        newt_secret: installation.pangolin_newt_secret,
+        endpoint: installation.pangolin_endpoint,
+        url: installation.pangolin_url,
+      } : {
+        newt_id: `newt_${id.slice(0, 8)}`,
+        newt_secret: `placeholder_${id.slice(0, 16)}`,
+        endpoint: 'https://app.pangolin.net',
+        url: null,
+      };
       return res.json({
         customer: {
           name: installation.customer_name || '',
           email: installation.customer_email || '',
           address: installation.customer_address || '',
         },
-        pangolin: installation.pangolin_newt_id ? {
-          newt_id: installation.pangolin_newt_id,
-          newt_secret: installation.pangolin_newt_secret,
-          endpoint: installation.pangolin_endpoint,
-          url: installation.pangolin_url,
-        } : null,
+        pangolin: pangolinSync,
       });
     }
 
@@ -308,6 +314,19 @@ app.get('/api/v1/installations/:id/config', async (req, res) => {
 
     console.log(`[CONFIG] Bootstrap for: ${id}`);
 
+    // Generate placeholder pangolin data if not configured (installer requires this)
+    const pangolinData = installation.pangolin_newt_id ? {
+      newt_id: installation.pangolin_newt_id,
+      newt_secret: installation.pangolin_newt_secret,
+      endpoint: installation.pangolin_endpoint,
+      url: installation.pangolin_url,
+    } : {
+      newt_id: `newt_${id.slice(0, 8)}`,
+      newt_secret: `placeholder_${randomUUID().slice(0, 16)}`,
+      endpoint: 'https://app.pangolin.net',
+      url: null, // Will be configured later
+    };
+
     res.json({
       auth: {
         access_token: accessToken,
@@ -320,12 +339,7 @@ app.get('/api/v1/installations/:id/config', async (req, res) => {
         email: installation.customer_email || '',
         address: installation.customer_address || '',
       },
-      pangolin: installation.pangolin_newt_id ? {
-        newt_id: installation.pangolin_newt_id,
-        newt_secret: installation.pangolin_newt_secret,
-        endpoint: installation.pangolin_endpoint,
-        url: installation.pangolin_url,
-      } : null,
+      pangolin: pangolinData,
     });
   } catch (e) {
     console.error('Config error:', e);
