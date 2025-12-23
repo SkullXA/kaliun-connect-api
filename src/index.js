@@ -1219,6 +1219,9 @@ app.post('/claim/:code', requireAuth, async (req, res) => {
 
 // Settings
 app.get('/settings', requireAuth, async (req, res) => {
+  // Get DB user for debugging
+  const dbUser = await db.findUserByEmail(req.user.email).catch(() => null);
+  
   res.send(html('Settings', `
     <h1><span>Account</span> Settings</h1>
     <div class="card">
@@ -1234,6 +1237,34 @@ app.get('/settings', requireAuth, async (req, res) => {
         </div>
         <button type="submit" class="btn">Save Changes</button>
       </form>
+    </div>
+    
+    <div class="card" style="margin-top: 24px; background: #1a1a2e; border: 1px solid #333;">
+      <h3>🔧 Debug Info</h3>
+      <div style="font-family: monospace; font-size: 12px; margin-top: 12px;">
+        <div style="margin-bottom: 8px;">
+          <span style="color: #888;">Supabase Auth ID:</span><br>
+          <code style="color: #4ade80;">${req.supabaseUser?.id || 'N/A'}</code>
+        </div>
+        <div style="margin-bottom: 8px;">
+          <span style="color: #888;">DB User ID:</span><br>
+          <code style="color: #60a5fa;">${dbUser?.id || 'NOT IN DB'}</code>
+        </div>
+        <div style="margin-bottom: 8px;">
+          <span style="color: #888;">IDs Match:</span>
+          <code style="color: ${req.supabaseUser?.id === dbUser?.id ? '#4ade80' : '#f87171'};">
+            ${req.supabaseUser?.id === dbUser?.id ? '✅ YES' : '❌ NO - MISMATCH!'}
+          </code>
+        </div>
+        <div style="margin-bottom: 8px;">
+          <span style="color: #888;">Provider:</span>
+          <code style="color: #fbbf24;">${dbUser?.provider || req.supabaseUser?.app_metadata?.provider || 'unknown'}</code>
+        </div>
+        <div style="margin-bottom: 8px;">
+          <span style="color: #888;">Local Dev Mode:</span>
+          <code style="color: #c084fc;">${isLocalDev ? 'YES' : 'NO (Production)'}</code>
+        </div>
+      </div>
     </div>
   `, req.user));
 });
