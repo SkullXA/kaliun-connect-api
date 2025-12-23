@@ -535,11 +535,18 @@ nav .brand { color: #3b82f6; font-weight: bold; font-size: 18px; }
 .two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
 .code { font-family: monospace; font-size: 32px; letter-spacing: 4px; text-align: center; background: #0a0a0a; padding: 20px; border-radius: 8px; margin: 20px 0; }
-.log-entry { font-family: monospace; font-size: 12px; padding: 8px 12px; border-bottom: 1px solid #222; }
-.log-entry .time { color: #666; }
-.log-entry .service { color: #3b82f6; }
+.log-entry { font-family: monospace; font-size: 12px; padding: 8px 12px; border-bottom: 1px solid #222; display: flex; gap: 8px; }
+.log-entry .time { color: #666; white-space: nowrap; }
+.log-entry .service { color: #3b82f6; white-space: nowrap; }
+.log-entry .msg { color: #ccc; word-break: break-word; }
 .log-entry.error { background: rgba(239, 68, 68, 0.1); }
+.log-entry.error .msg { color: #ef4444; }
 .log-entry.warning { background: rgba(234, 179, 8, 0.1); }
+.log-entry.warning .msg { color: #eab308; }
+.log-tabs { display: flex; gap: 4px; }
+.log-tab { background: transparent; border: 1px solid #333; color: #888; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; transition: all 0.2s; }
+.log-tab:hover { border-color: #555; color: #fff; }
+.log-tab.active { background: #3b82f6; border-color: #3b82f6; color: #fff; }
 `;
 
 const html = (title, content, user = null) => `
@@ -999,13 +1006,21 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
     const memoryPercent = memoryTotal ? Math.round((memoryUsed / memoryTotal) * 100) : 0;
     const diskPercent = diskTotal ? Math.round((diskUsed / diskTotal) * 100) : 0;
     
-    const logsHtml = logs?.length ? logs.map(log => `
+    // Separate logs by category
+    const haLogs = logs?.filter(l => l.service?.includes('homeassistant')) || [];
+    const systemLogs = logs?.filter(l => !l.service?.includes('homeassistant')) || [];
+    
+    const renderLogs = (logList) => logList.length ? logList.map(log => `
       <div class="log-entry ${log.level}">
         <span class="time">${new Date(log.timestamp).toLocaleTimeString()}</span>
-        <span class="service">[${log.service}]</span>
-        ${log.message}
+        <span class="service">[${log.service?.replace('.service', '') || 'system'}]</span>
+        <span class="msg">${log.message}</span>
       </div>
-    `).join('') : '<p style="padding: 20px; color: #666; text-align: center;">No logs yet</p>';
+    `).join('') : '<p style="padding: 20px; color: #666; text-align: center;">No logs</p>';
+    
+    const allLogsHtml = renderLogs(logs || []);
+    const haLogsHtml = renderLogs(haLogs);
+    const systemLogsHtml = renderLogs(systemLogs);
 
     res.send(html(`${installation.customer_name || 'KaliunBox'}`, `
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
@@ -1083,11 +1098,31 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
           </div>
           
           <div class="card">
-            <h3>Logs</h3>
-            <div style="max-height: 300px; overflow-y: auto; margin-top: 16px; background: #111; border-radius: 8px;">
-              ${logsHtml}
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <h3>Logs</h3>
+              <div class="log-tabs">
+                <button class="log-tab active" data-tab="all">All (${logs?.length || 0})</button>
+                <button class="log-tab" data-tab="ha">Home Assistant (${haLogs.length})</button>
+                <button class="log-tab" data-tab="system">System (${systemLogs.length})</button>
+              </div>
+            </div>
+            <div style="max-height: 400px; overflow-y: auto; margin-top: 16px; background: #111; border-radius: 8px;">
+              <div class="log-content" data-content="all">${allLogsHtml}</div>
+              <div class="log-content" data-content="ha" style="display:none;">${haLogsHtml}</div>
+              <div class="log-content" data-content="system" style="display:none;">${systemLogsHtml}</div>
             </div>
           </div>
+          <script>
+            document.querySelectorAll('.log-tab').forEach(tab => {
+              tab.addEventListener('click', () => {
+                document.querySelectorAll('.log-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                const target = tab.dataset.tab;
+                document.querySelectorAll('.log-content').forEach(c => c.style.display = 'none');
+                document.querySelector('.log-content[data-content="' + target + '"]').style.display = 'block';
+              });
+            });
+          </script>
         </div>
         
         <div>
