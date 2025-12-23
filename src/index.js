@@ -991,8 +991,13 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
        health.uptime_seconds > 3600 ? `${Math.floor(health.uptime_seconds / 3600)}h ${Math.floor((health.uptime_seconds % 3600) / 60)}m` :
        `${Math.floor(health.uptime_seconds / 60)}m`) : 'Unknown';
     
-    const memoryPercent = health.memory_total_bytes ? Math.round((health.memory_used_bytes / health.memory_total_bytes) * 100) : 0;
-    const diskPercent = health.disk_total_bytes ? Math.round((health.disk_used_bytes / health.disk_total_bytes) * 100) : 0;
+    // Health data uses nested structure: health.memory.total_bytes, health.disk.root_total_bytes
+    const memoryTotal = health.memory?.total_bytes || 0;
+    const memoryUsed = health.memory?.used_bytes || 0;
+    const diskTotal = health.disk?.root_total_bytes || 0;
+    const diskUsed = health.disk?.root_used_bytes || 0;
+    const memoryPercent = memoryTotal ? Math.round((memoryUsed / memoryTotal) * 100) : 0;
+    const diskPercent = diskTotal ? Math.round((diskUsed / diskTotal) * 100) : 0;
     
     const logsHtml = logs?.length ? logs.map(log => `
       <div class="log-entry ${log.level}">
@@ -1038,9 +1043,9 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
                 <div class="service-icon ha">🏠</div>
                 <div class="service-info">
                   <h4>Home Assistant</h4>
-                  <p>${health.ha_version || 'Unknown'}</p>
+                  <p>${health.home_assistant?.version || 'Unknown'}</p>
                 </div>
-                <span class="status ${health.ha_status === 'running' ? 'online' : 'offline'}">${health.ha_status === 'running' ? 'Running' : 'Stopped'}</span>
+                <span class="status ${health.home_assistant?.status === 'running' ? 'online' : 'offline'}">${health.home_assistant?.status === 'running' ? 'Running' : 'Stopped'}</span>
               </div>
               <div class="service-card">
                 <div class="service-icon vpn">🔐</div>
@@ -1063,7 +1068,7 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
                 <div class="progress">
                   <div class="progress-bar ${memoryPercent > 90 ? 'red' : memoryPercent > 70 ? 'yellow' : 'green'}" style="width: ${memoryPercent}%"></div>
                 </div>
-                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(health.memory_used_bytes)} / ${formatBytes(health.memory_total_bytes)}</div>
+                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(memoryUsed)} / ${formatBytes(memoryTotal)}</div>
               </div>
               <div>
                 <div style="display: flex; justify-content: space-between; font-size: 13px;">
@@ -1072,7 +1077,7 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
                 <div class="progress">
                   <div class="progress-bar ${diskPercent > 90 ? 'red' : diskPercent > 70 ? 'yellow' : 'blue'}" style="width: ${diskPercent}%"></div>
                 </div>
-                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(health.disk_used_bytes)} / ${formatBytes(health.disk_total_bytes)}</div>
+                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(diskUsed)} / ${formatBytes(diskTotal)}</div>
               </div>
             </div>
           </div>
@@ -1103,7 +1108,7 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
             <div style="margin-top: 16px; font-size: 13px;">
               <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
                 <span style="color: #666;">Host IP</span>
-                <span>${health.host_ip || 'Unknown'}</span>
+                <span>${health.network?.host_ip || 'Unknown'}</span>
               </div>
               <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
                 <span style="color: #666;">Architecture</span>
@@ -1111,7 +1116,7 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
               </div>
               <div style="display: flex; justify-content: space-between; padding: 8px 0;">
                 <span style="color: #666;">NixOS</span>
-                <span>${health.nixos_version || installation.nixos_version || 'Unknown'}</span>
+                <span>${health.system?.nixos_version || installation.nixos_version || 'Unknown'}</span>
               </div>
             </div>
           </div>
