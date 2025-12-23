@@ -883,11 +883,14 @@ app.get('/logout', async (req, res) => {
 app.get('/installations', requireAuth, async (req, res) => {
   const { success } = req.query;
   
-  console.log('[INSTALLATIONS] Loading for user:', req.supabaseUser.id);
+  // Use Supabase Auth ID consistently (not DB user ID)
+  const userId = req.supabaseUser.id;
+  console.log('[INSTALLATIONS] Loading for user:', userId);
+  console.log('[INSTALLATIONS] DB user ID:', req.user?.id);
   
   try {
     // Use direct PostgreSQL query
-    const installations = await db.findInstallationsByUserId(req.supabaseUser.id);
+    const installations = await db.findInstallationsByUserId(userId);
     console.log('[INSTALLATIONS] Found:', installations?.length || 0, 'installations');
 
     const list = installations?.length ? installations.map(i => {
@@ -1157,8 +1160,11 @@ app.post('/claim/:code', requireAuth, async (req, res) => {
   const { code } = req.params;
   const { customer_name, customer_email, customer_address } = req.body;
 
+  // Use Supabase Auth ID consistently (same as /installations query)
+  const userId = req.supabaseUser.id;
   console.log('[CLAIM] Attempting to claim code:', code);
-  console.log('[CLAIM] User ID:', req.user?.id);
+  console.log('[CLAIM] Supabase User ID:', userId);
+  console.log('[CLAIM] DB User ID:', req.user?.id);
   console.log('[CLAIM] User email:', req.user?.email);
 
   try {
@@ -1175,7 +1181,7 @@ app.post('/claim/:code', requireAuth, async (req, res) => {
       return res.redirect('/claim?error=Already claimed');
     }
 
-    await db.claimInstallation(code, req.user.id, customer_name, customer_email, customer_address);
+    await db.claimInstallation(code, userId, customer_name, customer_email, customer_address);
 
     console.log(`[CLAIM] Success! ${installation.install_id} claimed by ${req.user.email}`);
     res.redirect('/installations?success=Device claimed!');
