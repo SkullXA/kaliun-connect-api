@@ -1007,8 +1007,23 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
     const diskPercent = diskTotal ? Math.round((diskUsed / diskTotal) * 100) : 0;
     
     // Separate logs by category
-    const haLogs = logs?.filter(l => l.service?.includes('homeassistant')) || [];
-    const systemLogs = logs?.filter(l => !l.service?.includes('homeassistant')) || [];
+    // NOTE: log reporter sends systemd unit names (e.g. "homeassistant-vm.service", "kaliun-auto-update.service")
+    const isHaService = (s) => {
+      if (!s) return false;
+      return (
+        s.includes('homeassistant') ||
+        s.includes('havm') ||
+        s === 'homeassistant-vm.service'
+      );
+    };
+    const isAutoUpdateService = (s) => {
+      if (!s) return false;
+      return s.includes('kaliun-auto-update') || s.includes('auto-update');
+    };
+
+    const haLogs = logs?.filter(l => isHaService(l.service)) || [];
+    const updateLogs = logs?.filter(l => isAutoUpdateService(l.service)) || [];
+    const systemLogs = logs?.filter(l => !isHaService(l.service) && !isAutoUpdateService(l.service)) || [];
     
     const renderLogs = (logList) => logList.length ? logList.map(log => `
       <div class="log-entry ${log.level}">
@@ -1020,6 +1035,7 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
     
     const allLogsHtml = renderLogs(logs || []);
     const haLogsHtml = renderLogs(haLogs);
+    const updateLogsHtml = renderLogs(updateLogs);
     const systemLogsHtml = renderLogs(systemLogs);
 
     res.send(html(`${installation.customer_name || 'KaliunBox'}`, `
@@ -1103,12 +1119,14 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
               <div class="log-tabs">
                 <button class="log-tab active" data-tab="all">All (${logs?.length || 0})</button>
                 <button class="log-tab" data-tab="ha">Home Assistant (${haLogs.length})</button>
+                <button class="log-tab" data-tab="update">Auto Update (${updateLogs.length})</button>
                 <button class="log-tab" data-tab="system">System (${systemLogs.length})</button>
               </div>
             </div>
             <div style="max-height: 400px; overflow-y: auto; margin-top: 16px; background: #111; border-radius: 8px;">
               <div class="log-content" data-content="all">${allLogsHtml}</div>
               <div class="log-content" data-content="ha" style="display:none;">${haLogsHtml}</div>
+              <div class="log-content" data-content="update" style="display:none;">${updateLogsHtml}</div>
               <div class="log-content" data-content="system" style="display:none;">${systemLogsHtml}</div>
             </div>
           </div>
