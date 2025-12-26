@@ -1,25 +1,35 @@
--- Migration: Add Role System to Installations
--- Phase 1.3 of ARCHITECTURE.md
+-- Migration: Add Role System with Multi-User Support
+-- Phase 1.3 of ARCHITECTURE.md (revised)
 
--- Add role column with CHECK constraint
--- Valid roles: 'home_owner', 'installer', 'admin'
-ALTER TABLE public.installations
-ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'home_owner';
+-- Create installation_users join table for many-to-many with roles
+CREATE TABLE IF NOT EXISTS public.installation_users (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  installation_id UUID NOT NULL REFERENCES public.installations(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'home_owner' CHECK (role IN ('home_owner', 'installer')),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
 
--- Add CHECK constraint for valid roles
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'installations_role_check'
-  ) THEN
-    ALTER TABLE public.installations
-    ADD CONSTRAINT installations_role_check
-    CHECK (role IN ('home_owner', 'installer', 'admin'));
-  END IF;
-END $$;
+  -- Each user can only have one role per installation
+  UNIQUE(installation_id, user_id)
+);
 
--- Create index for role queries
-CREATE INDEX IF NOT EXISTS idx_installations_role ON public.installations(role);
+-- Add global admin flag to users table (for platform admins like Tomer)
+ALTER TABLE public.users
+ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
 
--- Update existing installations to have home_owner role (if NULL)
-UPDATE public.installations SET role = 'home_owner' WHERE role IS NULL;
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_installation_users_installation ON public.installation_users(installation_id);
+CREATE INDEX IF NOT EXISTS idx_installation_users_user ON public.installation_users(user_id);
+CREATE INDEX IF NOT EXISTS idx_installation_users_role ON public.installation_users(role);
+CREATE INDEX IF NOT EXISTS idx_users_is_admin ON public.users(is_admin) WHERE is_admin = TRUE;
+
+-- Migrate existing claimed_by relationships to installation_users
+-- (existing owners become home_owner role)
+INSERT INTO public.installation_users (installation_id, user_id, role)
+SELECT id, claimed_by, 'home_owner'
+FROM public.installations
+WHERE claimed_by IS NOT NULL
+ON CONFLICT (installation_id, user_id) DO NOTHING;
+
+-- Remove the role column from installations (no longer needed there)
+ALTER TABLE public.installations DROP COLUMN IF EXISTS role;

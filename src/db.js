@@ -102,6 +102,26 @@ export const db = {
     return result.rows;
   },
 
+  async findAllInstallations() {
+    const result = await this.query(
+      'SELECT * FROM installations ORDER BY last_health_at DESC NULLS LAST, created_at DESC',
+      []
+    );
+    return result.rows;
+  },
+
+  async getInstallationStats() {
+    const result = await this.query(
+      `SELECT
+         COUNT(*) as total,
+         COUNT(CASE WHEN claimed_by IS NOT NULL THEN 1 END) as claimed,
+         COUNT(CASE WHEN last_health_at > NOW() - INTERVAL '15 minutes' THEN 1 END) as online
+       FROM installations`,
+      []
+    );
+    return result.rows[0];
+  },
+
   async createInstallation({ installId, hostname, architecture, nixosVersion, claimCode }) {
     const result = await this.query(
       `INSERT INTO installations (install_id, hostname, architecture, nixos_version, claim_code)

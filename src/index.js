@@ -252,18 +252,21 @@ function requireBearerAuth(req, res, next) {
   next();
 }
 
-// Role hierarchy: admin > installer > home_owner
+// Role hierarchy: installer > home_owner (admin is global, not per-installation)
 const ROLE_HIERARCHY = {
-  'admin': 3,
   'installer': 2,
   'home_owner': 1
 };
 
 /**
  * Role-based access control middleware factory
- * Checks if the user has the required role for the installation they're accessing
+ * Checks if the user has access to the installation and required role level
  *
- * @param {string} minRole - Minimum required role ('home_owner', 'installer', 'admin')
+ * Access is granted if:
+ * 1. User is a global admin (users.is_admin = true) - can access ALL installations
+ * 2. User has a role on this installation via installation_users table
+ *
+ * @param {string} minRole - Minimum required role ('home_owner', 'installer')
  * @returns {Function} Express middleware
  *
  * Usage:
@@ -279,20 +282,46 @@ function requireRole(minRole) {
     }
 
     try {
-      const installation = await db.findInstallationByInstallId(installId);
+      const userId = req.supabaseUser?.id;
+      if (!userId) {
+        return res.status(401).json({ error: 'unauthorized', message: 'Not authenticated' });
+      }
 
+      // Check if user is global admin
+      const isAdmin = req.user?.is_admin === true;
+
+      const installation = await db.findInstallationByInstallId(installId);
       if (!installation) {
         return res.status(404).json({ error: 'not_found', message: 'Installation not found' });
       }
 
-      // Check ownership first
-      if (installation.claimed_by !== req.supabaseUser?.id) {
-        console.warn('[ROLE] User does not own installation:', req.supabaseUser?.id, 'vs', installation.claimed_by);
+      // Admins can access everything with full permissions
+      if (isAdmin) {
+        req.installation = installation;
+        req.userRole = 'admin';
+        req.isAdmin = true;
+        return next();
+      }
+
+      // Check user's role on this installation via installation_users table
+      const userInstall = await db.query(
+        `SELECT role FROM public.installation_users
+         WHERE installation_id = $1 AND user_id = $2`,
+        [installation.id, userId]
+      );
+
+      if (!userInstall.rows.length) {
+        // Fallback: check legacy claimed_by for backwards compatibility
+        if (installation.claimed_by === userId) {
+          req.installation = installation;
+          req.userRole = 'home_owner';
+          return next();
+        }
+        console.warn('[ROLE] User has no access to installation:', userId);
         return res.status(403).json({ error: 'forbidden', message: 'Not authorized to access this installation' });
       }
 
-      // Get user's role for this installation (default to home_owner if not set)
-      const userRole = installation.role || 'home_owner';
+      const userRole = userInstall.rows[0].role;
       const userRoleLevel = ROLE_HIERARCHY[userRole] || 1;
       const requiredRoleLevel = ROLE_HIERARCHY[minRole] || 1;
 
@@ -586,42 +615,60 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .container { max-width: 1200px; margin: 0 auto; padding: 40px 20px; }
 .container-narrow { max-width: 500px; }
 .logo { font-size: 28px; font-weight: bold; color: #3b82f6; margin-bottom: 40px; text-align: center; }
-.card { background: #1a1a1a; border-radius: 12px; padding: 24px; margin-bottom: 24px; border: 1px solid #333; }
-h1 { font-size: 24px; margin-bottom: 8px; }
+.card { background: #1a1a1a; border-radius: 12px; padding: 24px; margin-bottom: 24px; border: 1px solid #262626; }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.card-header h3 { margin-bottom: 0; }
+h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; line-height: 1.2; }
 h1 span, h2 span { color: #3b82f6; }
-h2 { font-size: 18px; margin-bottom: 16px; color: #888; }
-h3 { font-size: 14px; color: #666; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
-p { color: #888; margin-bottom: 16px; }
+h2 { font-size: 20px; font-weight: 600; margin-bottom: 16px; color: #888; line-height: 1.3; }
+h3 { font-size: 13px; color: #737373; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 16px; font-weight: 600; }
+p { color: #a3a3a3; margin-bottom: 16px; line-height: 1.5; }
 .form-group { margin-bottom: 20px; }
 label { display: block; margin-bottom: 8px; font-size: 14px; color: #999; }
 input[type="text"], input[type="email"], input[type="password"] { width: 100%; padding: 12px 16px; border-radius: 8px; background: #0a0a0a; border: 1px solid #333; color: #fff; font-size: 16px; }
 input:focus { outline: none; border-color: #3b82f6; }
-.btn { display: inline-block; padding: 12px 24px; border-radius: 8px; border: none; background: #3b82f6; color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; text-decoration: none; text-align: center; }
+.btn { display: inline-block; padding: 12px 24px; border-radius: 8px; border: none; background: #3b82f6; color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; text-decoration: none; text-align: center; transition: all 0.2s; }
 .btn:hover { background: #2563eb; }
-.btn-secondary { background: #333; color: #fff; }
-.btn-secondary:hover { background: #444; }
+.btn-secondary { background: #262626; color: #fff; border: 1px solid #333; }
+.btn-secondary:hover { background: #333; border-color: #404040; }
 .btn-google { background: #fff; color: #333; border: 1px solid #ddd; display: flex; align-items: center; justify-content: center; gap: 10px; }
 .btn-google:hover { background: #f5f5f5; }
 .btn-github { background: #24292e; }
 .btn-github:hover { background: #1b1f23; }
 .btn-full { width: 100%; }
 .btn-sm { padding: 8px 16px; font-size: 12px; }
-.success { background: #166534; padding: 16px; border-radius: 8px; margin-bottom: 24px; color: #4ade80; }
-.error { background: #991b1b; padding: 16px; border-radius: 8px; margin-bottom: 24px; color: #fca5a5; }
+.success { background: rgba(34, 197, 94, 0.1); padding: 16px; border-radius: 8px; margin-bottom: 24px; color: #22c55e; border: 1px solid rgba(34, 197, 94, 0.2); }
+.error { background: rgba(239, 68, 68, 0.1); padding: 16px; border-radius: 8px; margin-bottom: 24px; color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); }
 .divider { display: flex; align-items: center; margin: 24px 0; color: #666; }
 .divider::before, .divider::after { content: ''; flex: 1; border-bottom: 1px solid #333; }
 .divider span { padding: 0 16px; font-size: 12px; text-transform: uppercase; }
-nav { background: #111; border-bottom: 1px solid #333; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+nav { background: #111; border-bottom: 1px solid #262626; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
 nav .nav-left { display: flex; align-items: center; gap: 24px; }
-nav a { color: #888; text-decoration: none; font-size: 14px; }
-nav a:hover, nav a.active { color: #3b82f6; }
+nav .nav-right { display: flex; align-items: center; gap: 16px; }
+nav a { color: #737373; text-decoration: none; font-size: 14px; font-weight: 500; transition: color 0.2s; }
+nav a:hover, nav a.active { color: #fff; }
 nav .brand { color: #3b82f6; font-weight: bold; font-size: 18px; }
-.status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }
-.status.online { background: #166534; color: #4ade80; }
-.status.offline { background: #7f1d1d; color: #f87171; }
-.status.pending { background: #78350f; color: #fcd34d; }
-.status.unknown { background: #374151; color: #9ca3af; }
-.status::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+nav .role-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+nav .role-badge.admin { background: rgba(139, 92, 246, 0.15); color: #a78bfa; border: 1px solid rgba(139, 92, 246, 0.3); }
+nav .role-badge.installer { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+nav .role-badge.home_owner { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+
+/* Professional Badge/Status Styles */
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 9999px; font-size: 12px; font-weight: 500; letter-spacing: 0.01em; border: 1px solid transparent; transition: all 0.2s; }
+.badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.badge.online, .badge.running, .badge.success { background: rgba(34, 197, 94, 0.1); color: #22c55e; border-color: rgba(34, 197, 94, 0.2); }
+.badge.offline, .badge.stopped, .badge.error { background: rgba(239, 68, 68, 0.1); color: #ef4444; border-color: rgba(239, 68, 68, 0.2); }
+.badge.pending, .badge.warning { background: rgba(234, 179, 8, 0.1); color: #eab308; border-color: rgba(234, 179, 8, 0.2); }
+.badge.unknown, .badge.inactive { background: rgba(115, 115, 115, 0.1); color: #a3a3a3; border-color: rgba(115, 115, 115, 0.2); }
+.badge.info { background: rgba(59, 130, 246, 0.1); color: #3b82f6; border-color: rgba(59, 130, 246, 0.2); }
+
+/* Legacy .status for backwards compatibility */
+.status { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 9999px; font-size: 12px; font-weight: 500; border: 1px solid transparent; }
+.status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.status.online { background: rgba(34, 197, 94, 0.1); color: #22c55e; border-color: rgba(34, 197, 94, 0.2); }
+.status.offline { background: rgba(239, 68, 68, 0.1); color: #ef4444; border-color: rgba(239, 68, 68, 0.2); }
+.status.pending { background: rgba(234, 179, 8, 0.1); color: #eab308; border-color: rgba(234, 179, 8, 0.2); }
+.status.unknown { background: rgba(115, 115, 115, 0.1); color: #a3a3a3; border-color: rgba(115, 115, 115, 0.2); }
 .installation-item { display: flex; justify-content: space-between; align-items: center; padding: 20px; border-bottom: 1px solid #333; cursor: pointer; transition: background 0.2s; }
 .installation-item:hover { background: #222; }
 .installation-item:last-child { border-bottom: none; }
@@ -668,8 +715,25 @@ nav .brand { color: #3b82f6; font-weight: bold; font-size: 18px; }
 .log-tab.active { background: #3b82f6; border-color: #3b82f6; color: #fff; }
 `;
 
-const html = (title, content, user = null) => `
-<!DOCTYPE html>
+function html(title, content, user = null) {
+  const isAdmin = user?.is_admin === true;
+  const userRole = isAdmin ? 'admin' : 'home_owner';
+  const roleLabel = isAdmin ? 'Administrator' : 'Home Owner';
+
+  const navContent = user ? `<nav>
+    <div class="nav-left">
+      <a href="/" class="brand">Kaliun</a>
+      ${isAdmin ? '<a href="/admin">Dashboard</a>' : ''}
+      <a href="/installations">${isAdmin ? 'All Installations' : 'My Installations'}</a>
+      <a href="/settings">Settings</a>
+    </div>
+    <div class="nav-right">
+      <span class="role-badge ${userRole}">${roleLabel}</span>
+      <a href="/logout">Logout</a>
+    </div>
+  </nav>` : '';
+
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -678,20 +742,14 @@ const html = (title, content, user = null) => `
   <style>${styles}</style>
 </head>
 <body>
-  ${user ? `<nav>
-    <div class="nav-left">
-      <a href="/" class="brand">⚡ Kaliun</a>
-      <a href="/installations">Installations</a>
-      <a href="/settings">Settings</a>
-    </div>
-    <a href="/logout">Logout</a>
-  </nav>` : ''}
+  ${navContent}
   <div class="container ${!user ? 'container-narrow' : ''}">
-    ${!user ? '<div class="logo">⚡ Kaliun</div>' : ''}
+    ${!user ? '<div class="logo">Kaliun</div>' : ''}
     ${content}
   </div>
 </body>
 </html>`;
+}
 
 // =============================================================================
 // Auth Routes (Supabase)
@@ -1049,28 +1107,145 @@ app.get('/logout', async (req, res) => {
 // Dashboard Routes
 // =============================================================================
 
-// GET /installations - List all installations
+// GET /admin - Admin dashboard (admins only)
+app.get('/admin', requireAuth, async (req, res) => {
+  const isAdmin = req.user?.is_admin === true;
+
+  if (!isAdmin) {
+    return res.redirect('/installations');
+  }
+
+  try {
+    const installations = await db.findAllInstallations();
+
+    // Calculate stats
+    const total = installations.length;
+    const online = installations.filter(i => getDeviceStatus(i.last_health_at).isOnline).length;
+    const offline = installations.filter(i => {
+      const { status } = getDeviceStatus(i.last_health_at);
+      return status === 'offline';
+    }).length;
+    const unknown = installations.filter(i => getDeviceStatus(i.last_health_at).status === 'unknown').length;
+    const claimed = installations.filter(i => i.claimed_by).length;
+    const unclaimed = total - claimed;
+
+    // Recent activity (last 5 devices with health reports)
+    const recentDevices = installations
+      .filter(i => i.last_health_at)
+      .slice(0, 5)
+      .map(i => {
+        const { status } = getDeviceStatus(i.last_health_at);
+        return `
+          <a href="/installations/${i.install_id}" class="installation-item" style="text-decoration: none; color: inherit;">
+            <div class="installation-info">
+              <h4>${i.customer_name || i.hostname || 'KaliunBox'}</h4>
+              <p>${i.install_id.slice(0, 12)}... · Last seen ${timeAgo(i.last_health_at)}</p>
+            </div>
+            <span class="status ${status}">${status === 'online' ? 'Online' : status === 'offline' ? 'Offline' : 'Unknown'}</span>
+          </a>`;
+      }).join('');
+
+    res.send(html('Admin Dashboard', `
+      <h1>Admin <span>Dashboard</span></h1>
+      <p>Platform overview and system statistics</p>
+
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px;">
+        <div class="card" style="text-align: center; padding: 24px;">
+          <div style="font-size: 40px; font-weight: bold; color: #fff;">${total}</div>
+          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Total Devices</div>
+        </div>
+        <div class="card" style="text-align: center; padding: 24px;">
+          <div style="font-size: 40px; font-weight: bold; color: #22c55e;">${online}</div>
+          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Online Now</div>
+        </div>
+        <div class="card" style="text-align: center; padding: 24px;">
+          <div style="font-size: 40px; font-weight: bold; color: #ef4444;">${offline}</div>
+          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Offline</div>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px;">
+        <div class="card" style="text-align: center; padding: 24px;">
+          <div style="font-size: 40px; font-weight: bold; color: #3b82f6;">${claimed}</div>
+          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Claimed</div>
+        </div>
+        <div class="card" style="text-align: center; padding: 24px;">
+          <div style="font-size: 40px; font-weight: bold; color: #eab308;">${unclaimed}</div>
+          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Unclaimed</div>
+        </div>
+        <div class="card" style="text-align: center; padding: 24px;">
+          <div style="font-size: 40px; font-weight: bold; color: #a3a3a3;">${unknown}</div>
+          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Never Reported</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3>Recent Activity</h3>
+          <a href="/installations" class="btn btn-sm btn-secondary">View All</a>
+        </div>
+        ${recentDevices || '<p style="color: #666; text-align: center; padding: 20px;">No recent activity</p>'}
+      </div>
+    `, req.user));
+  } catch (e) {
+    console.error('[ADMIN] Error:', e.message);
+    res.send(html('Error', `<div class="error">Failed to load admin dashboard: ${e.message}</div>`, req.user));
+  }
+});
+
+// GET /installations - List all installations (admins see ALL)
 app.get('/installations', requireAuth, async (req, res) => {
   const { success } = req.query;
-  
+  const isAdmin = req.user?.is_admin === true;
+
   // Use Supabase Auth ID consistently (not DB user ID)
   const userId = req.supabaseUser.id;
-  console.log('[INSTALLATIONS] Loading for user:', userId);
-  console.log('[INSTALLATIONS] DB user ID:', req.user?.id);
-  
+  console.log('[INSTALLATIONS] Loading for user:', userId, 'isAdmin:', isAdmin);
+
   try {
-    // Use direct PostgreSQL query
-    const installations = await db.findInstallationsByUserId(userId);
+    // Admins see ALL installations, regular users see only their own
+    const installations = isAdmin
+      ? await db.findAllInstallations()
+      : await db.findInstallationsByUserId(userId);
+
     console.log('[INSTALLATIONS] Found:', installations?.length || 0, 'installations');
+
+    // Calculate stats for admin header
+    let statsHtml = '';
+    if (isAdmin && installations?.length) {
+      const online = installations.filter(i => {
+        const { isOnline } = getDeviceStatus(i.last_health_at);
+        return isOnline;
+      }).length;
+      const claimed = installations.filter(i => i.claimed_by).length;
+      statsHtml = `
+        <div style="display: flex; gap: 24px; margin-bottom: 24px;">
+          <div class="card" style="flex: 1; text-align: center; padding: 20px;">
+            <div style="font-size: 32px; font-weight: bold; color: #fff;">${installations.length}</div>
+            <div style="font-size: 12px; color: #666; text-transform: uppercase;">Total Devices</div>
+          </div>
+          <div class="card" style="flex: 1; text-align: center; padding: 20px;">
+            <div style="font-size: 32px; font-weight: bold; color: #22c55e;">${online}</div>
+            <div style="font-size: 12px; color: #666; text-transform: uppercase;">Online</div>
+          </div>
+          <div class="card" style="flex: 1; text-align: center; padding: 20px;">
+            <div style="font-size: 32px; font-weight: bold; color: #3b82f6;">${claimed}</div>
+            <div style="font-size: 12px; color: #666; text-transform: uppercase;">Claimed</div>
+          </div>
+        </div>`;
+    }
 
     const list = installations?.length ? installations.map(i => {
       const { status, isOnline } = getDeviceStatus(i.last_health_at);
       const statusLabel = status === 'unknown' ? 'Unknown' : (isOnline ? 'Online' : 'Offline');
+      // For admins, show owner info if available
+      const ownerInfo = isAdmin && i.customer_name ? ` · ${i.customer_name}` : '';
+      const claimStatus = isAdmin && !i.claimed_by ? ' · <span style="color: #eab308;">Unclaimed</span>' : '';
       return `
         <a href="/installations/${i.install_id}" class="installation-item" style="text-decoration: none; color: inherit;">
           <div class="installation-info">
             <h4>${i.customer_name || i.hostname || 'KaliunBox'}</h4>
-            <p>${i.install_id.slice(0, 12)}...</p>
+            <p>${i.install_id.slice(0, 12)}...${ownerInfo}${claimStatus}</p>
           </div>
           <span class="status ${status}">${statusLabel}</span>
         </a>`;
@@ -1078,14 +1253,18 @@ app.get('/installations', requireAuth, async (req, res) => {
       <div style="text-align: center; padding: 60px 20px; color: #666;">
         <p style="font-size: 48px; margin-bottom: 16px;">📦</p>
         <h3 style="color: #888;">No installations yet</h3>
-        <p>Scan a KaliunBox QR code to claim your first device.</p>
-        <a href="/claim" class="btn" style="margin-top: 16px;">Claim a Device</a>
+        <p>${isAdmin ? 'No devices have registered with the platform.' : 'Scan a KaliunBox QR code to claim your first device.'}</p>
+        ${!isAdmin ? '<a href="/claim" class="btn" style="margin-top: 16px;">Claim a Device</a>' : ''}
       </div>`;
 
-    res.send(html('My Installations', `
-      <h1>My <span>Installations</span></h1>
-      <p>View your Kaliun installations</p>
+    const pageTitle = isAdmin ? 'All Installations' : 'My Installations';
+    const pageSubtitle = isAdmin ? 'Platform-wide device overview' : 'View your Kaliun installations';
+
+    res.send(html(pageTitle, `
+      <h1>${isAdmin ? 'All' : 'My'} <span>Installations</span></h1>
+      <p>${pageSubtitle}</p>
       ${success ? `<div class="success">${success}</div>` : ''}
+      ${statsHtml}
       <div class="card" style="padding: 0; overflow: hidden;">${list}</div>
     `, req.user));
   } catch (e) {
@@ -1098,9 +1277,10 @@ app.get('/installations', requireAuth, async (req, res) => {
 app.get('/installations/:id', requireAuth, async (req, res) => {
   try {
     const installation = await db.findInstallationByInstallId(req.params.id);
-    
-    // Check ownership
-    if (!installation || installation.claimed_by !== req.supabaseUser.id) {
+    const isAdmin = req.user?.is_admin === true;
+
+    // Check ownership (admins can access any installation)
+    if (!installation || (!isAdmin && installation.claimed_by !== req.supabaseUser.id)) {
       return res.redirect('/installations');
     }
     
@@ -1188,24 +1368,40 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
           </div>
           
           <div class="card">
-            <h3>Services</h3>
+            <h3>Home Assistant</h3>
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding-bottom: 16px; border-bottom: 1px solid #333;">
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <div style="font-size: 24px;">🏠</div>
+                <div>
+                  <div style="font-weight: 600; color: #fff;">Home Assistant Core</div>
+                  <div style="font-size: 13px; color: #666;">${health.home_assistant?.version || 'Unknown version'}${health.home_assistant?.os_version ? ` · HAOS ${health.home_assistant.os_version}` : ''}</div>
+                </div>
+              </div>
+              <span class="badge ${health.home_assistant?.status === 'running' ? 'online' : 'offline'}">${health.home_assistant?.status === 'running' ? 'Running' : health.home_assistant?.status || 'Stopped'}</span>
+            </div>
             <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 16px;">
-              <div class="service-card">
-                <div class="service-icon ha">🏠</div>
-                <div class="service-info">
-                  <h4>Home Assistant</h4>
-                  <p>${health.home_assistant?.version || 'Unknown'}</p>
-                </div>
-                <span class="status ${health.home_assistant?.status === 'running' ? 'online' : 'offline'}">${health.home_assistant?.status === 'running' ? 'Running' : 'Stopped'}</span>
+              <div style="text-align: center; padding: 16px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; border: 1px solid rgba(59, 130, 246, 0.2);">
+                <div style="font-size: 28px; font-weight: bold; color: #3b82f6;">${health.home_assistant?.device_count ?? '-'}</div>
+                <div style="font-size: 12px; color: #888; text-transform: uppercase; margin-top: 4px;">Devices</div>
               </div>
-              <div class="service-card">
-                <div class="service-icon vpn">🔐</div>
-                <div class="service-info">
-                  <h4>Remote Access</h4>
-                  <p>VPN tunnel</p>
-                </div>
-                <span class="status ${health.newt_connected ? 'online' : 'pending'}">${health.newt_connected ? 'Online' : 'Not configured'}</span>
+              <div style="text-align: center; padding: 16px; background: rgba(139, 92, 246, 0.1); border-radius: 8px; border: 1px solid rgba(139, 92, 246, 0.2);">
+                <div style="font-size: 28px; font-weight: bold; color: #a78bfa;">${health.home_assistant?.integration_count ?? '-'}</div>
+                <div style="font-size: 12px; color: #888; text-transform: uppercase; margin-top: 4px;">Integrations</div>
               </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Remote Access</h3>
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 16px;">
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <div style="font-size: 24px;">🔐</div>
+                <div>
+                  <div style="font-weight: 600; color: #fff;">Newt VPN Tunnel</div>
+                  <div style="font-size: 13px; color: #666;">Secure remote access</div>
+                </div>
+              </div>
+              <span class="badge ${health.newt_agent?.healthy ? 'online' : 'pending'}">${health.newt_agent?.healthy ? 'Connected' : 'Not configured'}</span>
             </div>
           </div>
           
@@ -1417,51 +1613,104 @@ app.post('/claim/:code', requireAuth, async (req, res) => {
 app.get('/settings', requireAuth, async (req, res) => {
   // Get DB user for debugging
   const dbUser = await db.findUserByEmail(req.user.email).catch(() => null);
-  
+  const isAdmin = req.user?.is_admin === true;
+  const userRole = isAdmin ? 'admin' : 'home_owner';
+  const roleLabel = isAdmin ? 'Administrator' : 'Home Owner';
+  const roleDescription = isAdmin
+    ? 'Full platform access - manage all devices and users'
+    : 'Standard account - manage your claimed devices';
+
+  // Get user's installations count
+  const userId = req.supabaseUser?.id;
+  const installations = userId ? await db.findInstallationsByUserId(userId).catch(() => []) : [];
+
   res.send(html('Settings', `
     <h1><span>Account</span> Settings</h1>
+
     <div class="card">
+      <h3>Account Overview</h3>
+      <div style="display: flex; align-items: center; gap: 20px; margin-top: 16px;">
+        <div style="width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, #3b82f6, #8b5cf6); display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; color: white;">
+          ${(req.user.name || req.user.email || 'U').charAt(0).toUpperCase()}
+        </div>
+        <div style="flex: 1;">
+          <div style="font-size: 18px; font-weight: 600; color: #fff;">${req.user.name || 'User'}</div>
+          <div style="font-size: 14px; color: #666; margin-top: 2px;">${req.user.email}</div>
+          <div style="margin-top: 8px;">
+            <span class="role-badge ${userRole}">${roleLabel}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 24px;">
+      <div class="card" style="text-align: center; padding: 24px;">
+        <div style="font-size: 32px; font-weight: bold; color: #3b82f6;">${installations.length}</div>
+        <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">My Devices</div>
+      </div>
+      <div class="card" style="text-align: center; padding: 24px;">
+        <div style="font-size: 32px; font-weight: bold; color: #22c55e;">
+          ${installations.filter(i => getDeviceStatus(i.last_health_at).isOnline).length}
+        </div>
+        <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Online</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 24px;">
+      <h3>Role & Permissions</h3>
+      <div style="margin-top: 16px; padding: 16px; background: rgba(${isAdmin ? '139, 92, 246' : '34, 197, 94'}, 0.1); border-radius: 8px; border: 1px solid rgba(${isAdmin ? '139, 92, 246' : '34, 197, 94'}, 0.2);">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <span class="role-badge ${userRole}" style="font-size: 13px;">${roleLabel}</span>
+        </div>
+        <div style="margin-top: 12px; font-size: 14px; color: #a3a3a3;">
+          ${roleDescription}
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 24px;">
       <h3>Profile</h3>
       <form action="/settings/profile" method="POST" style="margin-top: 16px;">
         <div class="form-group">
-          <label>Name</label>
-          <input type="text" name="name" value="${req.user.name || ''}">
+          <label>Display Name</label>
+          <input type="text" name="name" value="${req.user.name || ''}" placeholder="Enter your name">
         </div>
         <div class="form-group">
-          <label>Email</label>
-          <input type="email" disabled value="${req.user.email}">
+          <label>Email Address</label>
+          <input type="email" disabled value="${req.user.email}" style="opacity: 0.6; cursor: not-allowed;">
+          <div style="font-size: 12px; color: #666; margin-top: 4px;">Email cannot be changed</div>
         </div>
         <button type="submit" class="btn">Save Changes</button>
       </form>
     </div>
-    
+
+    ${isAdmin ? `
     <div class="card" style="margin-top: 24px; background: #1a1a2e; border: 1px solid #333;">
-      <h3>🔧 Debug Info</h3>
+      <h3>Debug Info</h3>
       <div style="font-family: monospace; font-size: 12px; margin-top: 12px;">
         <div style="margin-bottom: 8px;">
-          <span style="color: #888;">Supabase Auth ID:</span><br>
-          <code style="color: #4ade80;">${req.supabaseUser?.id || 'N/A'}</code>
+          <span style="color: #888;">Auth ID:</span>
+          <code style="color: #4ade80; margin-left: 8px;">${req.supabaseUser?.id || 'N/A'}</code>
         </div>
         <div style="margin-bottom: 8px;">
-          <span style="color: #888;">DB User ID:</span><br>
-          <code style="color: #60a5fa;">${dbUser?.id || 'NOT IN DB'}</code>
-        </div>
-        <div style="margin-bottom: 8px;">
-          <span style="color: #888;">IDs Match:</span>
-          <code style="color: ${req.supabaseUser?.id === dbUser?.id ? '#4ade80' : '#f87171'};">
-            ${req.supabaseUser?.id === dbUser?.id ? '✅ YES' : '❌ NO - MISMATCH!'}
-          </code>
+          <span style="color: #888;">DB User ID:</span>
+          <code style="color: #60a5fa; margin-left: 8px;">${dbUser?.id || 'NOT IN DB'}</code>
         </div>
         <div style="margin-bottom: 8px;">
           <span style="color: #888;">Provider:</span>
-          <code style="color: #fbbf24;">${dbUser?.provider || req.supabaseUser?.app_metadata?.provider || 'unknown'}</code>
+          <code style="color: #fbbf24; margin-left: 8px;">${dbUser?.provider || req.supabaseUser?.app_metadata?.provider || 'unknown'}</code>
         </div>
         <div style="margin-bottom: 8px;">
-          <span style="color: #888;">Local Dev Mode:</span>
-          <code style="color: #c084fc;">${isLocalDev ? 'YES' : 'NO (Production)'}</code>
+          <span style="color: #888;">is_admin:</span>
+          <code style="color: #c084fc; margin-left: 8px;">${isAdmin ? 'true' : 'false'}</code>
+        </div>
+        <div style="margin-bottom: 8px;">
+          <span style="color: #888;">Environment:</span>
+          <code style="color: #c084fc; margin-left: 8px;">${isLocalDev ? 'Local Dev' : 'Production'}</code>
         </div>
       </div>
     </div>
+    ` : ''}
   `, req.user));
 });
 
