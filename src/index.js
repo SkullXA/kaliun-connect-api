@@ -12,7 +12,13 @@ import cookieParser from 'cookie-parser';
 import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { supabase, supabaseAdmin, supabaseUrl, supabaseAnonKey, db, isLocalDev } from './db.js';
+
+// ES module __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -32,6 +38,9 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+// Serve static files from public directory (for logos, images, etc.)
+app.use('/public', express.static(path.join(__dirname, '..', 'public')));
 
 // Helper functions
 function generateClaimCode() {
@@ -700,7 +709,6 @@ nav .role-badge.home_owner { background: rgba(34, 197, 94, 0.15); color: #4ade80
 .timeline-dot.green { background: #166534; color: #4ade80; }
 .timeline-dot.blue { background: #1e3a8a; color: #60a5fa; }
 .two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; }
-@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
 .code { font-family: monospace; font-size: 32px; letter-spacing: 4px; text-align: center; background: #0a0a0a; padding: 20px; border-radius: 8px; margin: 20px 0; }
 .log-entry { font-family: monospace; font-size: 12px; padding: 8px 12px; border-bottom: 1px solid #222; display: flex; gap: 8px; }
 .log-entry .time { color: #666; white-space: nowrap; }
@@ -710,10 +718,88 @@ nav .role-badge.home_owner { background: rgba(34, 197, 94, 0.15); color: #4ade80
 .log-entry.error .msg { color: #ef4444; }
 .log-entry.warning { background: rgba(234, 179, 8, 0.1); }
 .log-entry.warning .msg { color: #eab308; }
-.log-tabs { display: flex; gap: 4px; }
+.log-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
 .log-tab { background: transparent; border: 1px solid #333; color: #888; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; transition: all 0.2s; }
 .log-tab:hover { border-color: #555; color: #fff; }
 .log-tab.active { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+
+/* Mobile Responsive Styles */
+@media (max-width: 900px) {
+  .two-col { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 768px) {
+  .container { padding: 20px 16px; }
+  h1 { font-size: 22px; }
+  h2 { font-size: 15px; }
+  .card { padding: 16px; margin-bottom: 16px; }
+
+  /* Nav mobile - horizontal scrollable */
+  nav { padding: 12px 16px; gap: 8px; }
+  nav .nav-left { flex-wrap: nowrap; gap: 16px; overflow-x: auto; }
+  nav .nav-right { gap: 10px; flex-shrink: 0; }
+  nav a { font-size: 13px; white-space: nowrap; }
+  nav .brand { font-size: 16px; }
+  nav .role-badge { font-size: 9px; padding: 3px 6px; }
+
+  /* Stat cards - 2 columns on tablet */
+  .stat-grid-3 { grid-template-columns: repeat(2, 1fr) !important; gap: 12px !important; }
+  .stat-value { font-size: 28px !important; }
+
+  /* Installation items */
+  .installation-item { padding: 14px; }
+  .installation-info h4 { font-size: 15px; }
+  .installation-info p { font-size: 12px; }
+
+  /* Log tabs scroll horizontally */
+  .log-tabs { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 8px; -webkit-overflow-scrolling: touch; }
+  .log-tab { flex-shrink: 0; font-size: 11px; padding: 4px 10px; }
+
+  /* Log entries */
+  .log-entry { flex-direction: column; gap: 4px; padding: 6px 10px; }
+  .log-entry .time { font-size: 10px; }
+  .log-entry .service { font-size: 11px; }
+  .log-entry .msg { font-size: 11px; }
+
+  /* Metric values smaller */
+  .metric-value { font-size: 24px; }
+
+  /* Status badges */
+  .status, .badge { font-size: 11px; padding: 4px 10px; }
+
+  /* Card grids */
+  [style*="grid-template-columns: repeat(2, 1fr)"] { grid-template-columns: 1fr !important; }
+  [style*="grid-template-columns: repeat(3, 1fr)"] { grid-template-columns: repeat(2, 1fr) !important; }
+}
+
+@media (max-width: 480px) {
+  .container { padding: 14px 10px; }
+  h1 { font-size: 20px; }
+  p { font-size: 13px; }
+  .card { padding: 12px; border-radius: 10px; }
+
+  /* Stack nav */
+  nav { flex-wrap: wrap; }
+  nav .nav-left { width: 100%; justify-content: center; gap: 12px; margin-bottom: 8px; }
+  nav .nav-right { width: 100%; justify-content: center; }
+
+  /* Stat cards single column on very small screens */
+  .stat-grid-3 { grid-template-columns: repeat(2, 1fr) !important; }
+  .stat-value { font-size: 24px !important; }
+
+  /* All 3-col grids become 1 col */
+  [style*="grid-template-columns: repeat(3, 1fr)"] { grid-template-columns: 1fr !important; }
+
+  /* Buttons */
+  .btn { padding: 10px 16px; font-size: 13px; }
+  .btn-sm { width: auto; padding: 6px 12px; }
+
+  /* Progress bar */
+  .progress { height: 6px; }
+
+  /* Form inputs */
+  input[type="text"], input[type="email"], input[type="password"] { padding: 10px 12px; font-size: 15px; }
+}
 `;
 
 function html(title, content, user = null) {
@@ -723,7 +809,7 @@ function html(title, content, user = null) {
 
   const navContent = user ? `<nav>
     <div class="nav-left">
-      <a href="/" class="brand">Kaliun</a>
+      <a href="/" class="brand"><img src="/public/images/kaliunlogo.png" alt="Kaliun" style="height: 28px;"></a>
       ${isAdmin ? '<a href="/admin">Dashboard</a>' : ''}
       <a href="/installations">${isAdmin ? 'All Installations' : 'My Installations'}</a>
       <a href="/settings">Settings</a>
@@ -740,6 +826,7 @@ function html(title, content, user = null) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${title} - Kaliun Connect</title>
+  <link rel="icon" href="/public/images/favicon.ico" type="image/x-icon">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -763,7 +850,7 @@ function html(title, content, user = null) {
 <body>
   ${navContent}
   <div class="container ${!user ? 'container-narrow' : ''}">
-    ${!user ? '<div class="logo">Kaliun</div>' : ''}
+    ${!user ? '<div class="logo"><img src="/public/images/kaliunlogo.png" alt="Kaliun" style="height: 48px;"></div>' : ''}
     ${content}
   </div>
 </body>
@@ -1168,33 +1255,33 @@ app.get('/admin', requireAuth, async (req, res) => {
       <h1>Admin <span>Dashboard</span></h1>
       <p>Platform overview and system statistics</p>
 
-      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px;">
-        <div class="card" style="text-align: center; padding: 24px;">
-          <div style="font-size: 40px; font-weight: bold; color: #fff;">${total}</div>
-          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Total Devices</div>
+      <div class="stat-grid-3" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px;">
+        <div class="card" style="text-align: center; padding: 20px;">
+          <div class="stat-value" style="font-size: 36px; font-weight: bold; color: #fff;">${total}</div>
+          <div style="font-size: 11px; color: #666; text-transform: uppercase; margin-top: 4px;">Total Devices</div>
         </div>
-        <div class="card" style="text-align: center; padding: 24px;">
-          <div style="font-size: 40px; font-weight: bold; color: #22c55e;">${online}</div>
-          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Online Now</div>
+        <div class="card" style="text-align: center; padding: 20px;">
+          <div class="stat-value" style="font-size: 36px; font-weight: bold; color: #22c55e;">${online}</div>
+          <div style="font-size: 11px; color: #666; text-transform: uppercase; margin-top: 4px;">Online Now</div>
         </div>
-        <div class="card" style="text-align: center; padding: 24px;">
-          <div style="font-size: 40px; font-weight: bold; color: #ef4444;">${offline}</div>
-          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Offline</div>
+        <div class="card" style="text-align: center; padding: 20px;">
+          <div class="stat-value" style="font-size: 36px; font-weight: bold; color: #ef4444;">${offline}</div>
+          <div style="font-size: 11px; color: #666; text-transform: uppercase; margin-top: 4px;">Offline</div>
         </div>
       </div>
 
-      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px;">
-        <div class="card" style="text-align: center; padding: 24px;">
-          <div style="font-size: 40px; font-weight: bold; color: #3b82f6;">${claimed}</div>
-          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Claimed</div>
+      <div class="stat-grid-3" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px;">
+        <div class="card" style="text-align: center; padding: 20px;">
+          <div class="stat-value" style="font-size: 36px; font-weight: bold; color: #3b82f6;">${claimed}</div>
+          <div style="font-size: 11px; color: #666; text-transform: uppercase; margin-top: 4px;">Claimed</div>
         </div>
-        <div class="card" style="text-align: center; padding: 24px;">
-          <div style="font-size: 40px; font-weight: bold; color: #eab308;">${unclaimed}</div>
-          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Unclaimed</div>
+        <div class="card" style="text-align: center; padding: 20px;">
+          <div class="stat-value" style="font-size: 36px; font-weight: bold; color: #eab308;">${unclaimed}</div>
+          <div style="font-size: 11px; color: #666; text-transform: uppercase; margin-top: 4px;">Unclaimed</div>
         </div>
-        <div class="card" style="text-align: center; padding: 24px;">
-          <div style="font-size: 40px; font-weight: bold; color: #a3a3a3;">${unknown}</div>
-          <div style="font-size: 12px; color: #666; text-transform: uppercase; margin-top: 4px;">Never Reported</div>
+        <div class="card" style="text-align: center; padding: 20px;">
+          <div class="stat-value" style="font-size: 36px; font-weight: bold; color: #a3a3a3;">${unknown}</div>
+          <div style="font-size: 11px; color: #666; text-transform: uppercase; margin-top: 4px;">Never Reported</div>
         </div>
       </div>
 
