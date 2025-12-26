@@ -83,6 +83,44 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+// Status detection constants
+const STATUS_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes (health reports every 5 min)
+
+/**
+ * Get device status based on last health report timestamp
+ * @param {string|null} lastHealthAt - ISO timestamp of last health report
+ * @returns {{ status: 'online'|'offline'|'unknown', isOnline: boolean }}
+ */
+function getDeviceStatus(lastHealthAt) {
+  // Never reported - unknown status
+  if (!lastHealthAt) {
+    return { status: 'unknown', isOnline: false };
+  }
+
+  // Parse timestamp safely (handle both ISO strings and Date objects)
+  let lastHealthTime;
+  try {
+    lastHealthTime = new Date(lastHealthAt).getTime();
+    // Check for invalid date
+    if (isNaN(lastHealthTime)) {
+      console.warn('[STATUS] Invalid date format:', lastHealthAt);
+      return { status: 'unknown', isOnline: false };
+    }
+  } catch (e) {
+    console.warn('[STATUS] Failed to parse date:', lastHealthAt, e.message);
+    return { status: 'unknown', isOnline: false };
+  }
+
+  // Compare using UTC (Date.now() is already UTC)
+  const now = Date.now();
+  const isOnline = (now - lastHealthTime) < STATUS_TIMEOUT_MS;
+
+  return {
+    status: isOnline ? 'online' : 'offline',
+    isOnline
+  };
+}
+
 // Auth middleware - Check session from cookie
 async function requireAuth(req, res, next) {
   console.log('[MIDDLEWARE] requireAuth called for:', req.path);
@@ -212,6 +250,72 @@ function requireBearerAuth(req, res, next) {
 
   req.tokenPayload = payload;
   next();
+}
+
+// Role hierarchy: admin > installer > home_owner
+const ROLE_HIERARCHY = {
+  'admin': 3,
+  'installer': 2,
+  'home_owner': 1
+};
+
+/**
+ * Role-based access control middleware factory
+ * Checks if the user has the required role for the installation they're accessing
+ *
+ * @param {string} minRole - Minimum required role ('home_owner', 'installer', 'admin')
+ * @returns {Function} Express middleware
+ *
+ * Usage:
+ *   app.get('/installations/:id/settings', requireAuth, requireRole('installer'), handler)
+ */
+function requireRole(minRole) {
+  return async (req, res, next) => {
+    const installId = req.params.id || req.params.installId;
+
+    if (!installId) {
+      console.warn('[ROLE] No installation ID in request');
+      return res.status(400).json({ error: 'bad_request', message: 'Installation ID required' });
+    }
+
+    try {
+      const installation = await db.findInstallationByInstallId(installId);
+
+      if (!installation) {
+        return res.status(404).json({ error: 'not_found', message: 'Installation not found' });
+      }
+
+      // Check ownership first
+      if (installation.claimed_by !== req.supabaseUser?.id) {
+        console.warn('[ROLE] User does not own installation:', req.supabaseUser?.id, 'vs', installation.claimed_by);
+        return res.status(403).json({ error: 'forbidden', message: 'Not authorized to access this installation' });
+      }
+
+      // Get user's role for this installation (default to home_owner if not set)
+      const userRole = installation.role || 'home_owner';
+      const userRoleLevel = ROLE_HIERARCHY[userRole] || 1;
+      const requiredRoleLevel = ROLE_HIERARCHY[minRole] || 1;
+
+      if (userRoleLevel < requiredRoleLevel) {
+        console.warn('[ROLE] Insufficient role:', userRole, 'required:', minRole);
+        return res.status(403).json({
+          error: 'forbidden',
+          message: `Requires ${minRole} role or higher`,
+          userRole,
+          requiredRole: minRole
+        });
+      }
+
+      // Attach installation and role info to request
+      req.installation = installation;
+      req.userRole = userRole;
+
+      next();
+    } catch (e) {
+      console.error('[ROLE] Error checking role:', e.message);
+      return res.status(500).json({ error: 'internal_error', message: 'Failed to check permissions' });
+    }
+  };
 }
 
 // =============================================================================
@@ -516,6 +620,7 @@ nav .brand { color: #3b82f6; font-weight: bold; font-size: 18px; }
 .status.online { background: #166534; color: #4ade80; }
 .status.offline { background: #7f1d1d; color: #f87171; }
 .status.pending { background: #78350f; color: #fcd34d; }
+.status.unknown { background: #374151; color: #9ca3af; }
 .status::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .installation-item { display: flex; justify-content: space-between; align-items: center; padding: 20px; border-bottom: 1px solid #333; cursor: pointer; transition: background 0.2s; }
 .installation-item:hover { background: #222; }
@@ -959,14 +1064,15 @@ app.get('/installations', requireAuth, async (req, res) => {
     console.log('[INSTALLATIONS] Found:', installations?.length || 0, 'installations');
 
     const list = installations?.length ? installations.map(i => {
-      const isOnline = i.last_health_at && (Date.now() - new Date(i.last_health_at).getTime()) < 10 * 60 * 1000;
+      const { status, isOnline } = getDeviceStatus(i.last_health_at);
+      const statusLabel = status === 'unknown' ? 'Unknown' : (isOnline ? 'Online' : 'Offline');
       return `
         <a href="/installations/${i.install_id}" class="installation-item" style="text-decoration: none; color: inherit;">
           <div class="installation-info">
             <h4>${i.customer_name || i.hostname || 'KaliunBox'}</h4>
             <p>${i.install_id.slice(0, 12)}...</p>
           </div>
-          <span class="status ${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</span>
+          <span class="status ${status}">${statusLabel}</span>
         </a>`;
     }).join('') : `
       <div style="text-align: center; padding: 60px 20px; color: #666;">
@@ -998,7 +1104,7 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
       return res.redirect('/installations');
     }
     
-    const isOnline = installation.last_health_at && (Date.now() - new Date(installation.last_health_at).getTime()) < 10 * 60 * 1000;
+    const { status: deviceStatus, isOnline } = getDeviceStatus(installation.last_health_at);
     const health = typeof installation.last_health === 'string' 
       ? JSON.parse(installation.last_health || '{}') 
       : (installation.last_health || {});
@@ -1058,9 +1164,9 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
           <a href="/installations" style="color: #666; text-decoration: none; font-size: 14px;">← Back</a>
           <h1 style="margin-top: 8px;">${installation.customer_name || 'KaliunBox'}</h1>
         </div>
-        <span class="status ${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</span>
+        <span class="status ${deviceStatus}">${deviceStatus === 'unknown' ? 'Unknown' : (isOnline ? 'Online' : 'Offline')}</span>
       </div>
-      
+
       <div class="two-col">
         <div>
           <div class="card">
@@ -1068,7 +1174,7 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px;">
               <div>
                 <div style="color: #666; font-size: 12px;">Status</div>
-                <span class="status ${isOnline ? 'online' : 'offline'}" style="margin-top: 8px;">${isOnline ? 'Online' : 'Offline'}</span>
+                <span class="status ${deviceStatus}" style="margin-top: 8px;">${deviceStatus === 'unknown' ? 'Unknown' : (isOnline ? 'Online' : 'Offline')}</span>
               </div>
               <div>
                 <div style="color: #666; font-size: 12px;">Last Seen</div>

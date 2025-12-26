@@ -24,11 +24,12 @@ CREATE TABLE IF NOT EXISTS public.installations (
   architecture TEXT,
   nixos_version TEXT,
   claim_code TEXT UNIQUE NOT NULL,
-  
-  -- Ownership
+
+  -- Ownership & Role
   claimed_by UUID REFERENCES public.users(id),
   claimed_at TIMESTAMPTZ,
-  
+  role TEXT DEFAULT 'home_owner' CHECK (role IN ('home_owner', 'installer', 'admin')),
+
   -- Customer info
   customer_name TEXT,
   customer_email TEXT,
@@ -90,6 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON public.users(email);
 CREATE INDEX IF NOT EXISTS idx_installations_install_id ON public.installations(install_id);
 CREATE INDEX IF NOT EXISTS idx_installations_claim_code ON public.installations(claim_code);
 CREATE INDEX IF NOT EXISTS idx_installations_claimed_by ON public.installations(claimed_by);
+CREATE INDEX IF NOT EXISTS idx_installations_role ON public.installations(role);
 CREATE INDEX IF NOT EXISTS idx_health_reports_installation_id ON public.health_reports(installation_id);
 CREATE INDEX IF NOT EXISTS idx_logs_installation_id ON public.logs(installation_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON public.sessions(token);
