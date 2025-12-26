@@ -408,11 +408,25 @@ app.post('/api/v1/installations/:id/health', requireBearerAuth, async (req, res)
     // Store health report
     await db.createHealthReport(installation.id, req.body);
 
-    // Update installation with latest health
-    await db.updateInstallation(id, {
+    // Build update object with latest health
+    const updateData = {
       last_health_at: new Date().toISOString(),
       last_health: JSON.stringify(req.body),
-    });
+    };
+
+    // Update architecture from health report if provided (keeps it current)
+    if (req.body.system?.arch) {
+      // Convert "aarch64-linux" to "aarch64" for display, or keep as-is
+      const arch = req.body.system.arch.replace('-linux', '');
+      updateData.architecture = arch;
+    }
+
+    // Update NixOS version from health report if provided
+    if (req.body.system?.nixos_version) {
+      updateData.nixos_version = req.body.system.nixos_version;
+    }
+
+    await db.updateInstallation(id, updateData);
 
     console.log(`[HEALTH] ${id}`);
     res.status(204).send();
