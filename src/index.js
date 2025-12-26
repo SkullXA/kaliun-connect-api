@@ -684,6 +684,7 @@ nav .role-badge.home_owner { background: rgba(34, 197, 94, 0.15); color: #4ade80
 .progress-bar.yellow { background: linear-gradient(90deg, #eab308, #ca8a04); }
 .progress-bar.red { background: linear-gradient(90deg, #ef4444, #dc2626); }
 .progress-bar.blue { background: linear-gradient(90deg, #3b82f6, #2563eb); }
+.progress-bar.purple { background: linear-gradient(90deg, #8b5cf6, #7c3aed); }
 .service-card { display: flex; align-items: center; gap: 16px; padding: 20px; background: #111; border-radius: 8px; }
 .service-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px; }
 .service-icon.ha { background: #18bcf2; }
@@ -734,11 +735,29 @@ function html(title, content, user = null) {
   </nav>` : '';
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${title} - Kaliun Connect</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            kaliun: {
+              blue: '#3b82f6',
+              dark: '#0a0a0a',
+              card: '#1a1a1a',
+              border: '#262626',
+            }
+          }
+        }
+      }
+    }
+  </script>
   <style>${styles}</style>
 </head>
 <body>
@@ -1406,29 +1425,56 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
           </div>
           
           <div class="card">
-            <h3>Health</h3>
+            <h3>System Resources</h3>
             <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 16px;">
               <div>
                 <div style="display: flex; justify-content: space-between; font-size: 13px;">
-                  <span>Memory</span><span>${memoryPercent}%</span>
+                  <span>Memory</span><span style="font-weight: 600;">${memoryPercent}%</span>
                 </div>
                 <div class="progress">
                   <div class="progress-bar ${memoryPercent > 90 ? 'red' : memoryPercent > 70 ? 'yellow' : 'green'}" style="width: ${memoryPercent}%"></div>
                 </div>
-                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(memoryUsed)} / ${formatBytes(memoryTotal)}</div>
+                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(memoryUsed)} used / ${formatBytes(memoryTotal)} total</div>
               </div>
               <div>
                 <div style="display: flex; justify-content: space-between; font-size: 13px;">
-                  <span>Disk</span><span>${diskPercent}%</span>
+                  <span>Root Disk</span><span style="font-weight: 600;">${diskPercent}%</span>
                 </div>
                 <div class="progress">
                   <div class="progress-bar ${diskPercent > 90 ? 'red' : diskPercent > 70 ? 'yellow' : 'blue'}" style="width: ${diskPercent}%"></div>
                 </div>
-                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(diskUsed)} / ${formatBytes(diskTotal)}</div>
+                <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(diskUsed)} used / ${formatBytes(diskTotal)} total</div>
               </div>
             </div>
+            ${health.disk?.ha_vm_total_bytes ? `
+            <div style="margin-top: 16px;">
+              <div style="display: flex; justify-content: space-between; font-size: 13px;">
+                <span>HA VM Disk</span><span style="font-weight: 600;">${Math.round((health.disk.ha_vm_used_bytes || 0) / (health.disk.ha_vm_total_bytes || 1) * 100)}%</span>
+              </div>
+              <div class="progress">
+                <div class="progress-bar purple" style="width: ${Math.round((health.disk.ha_vm_used_bytes || 0) / (health.disk.ha_vm_total_bytes || 1) * 100)}%"></div>
+              </div>
+              <div style="font-size: 11px; color: #666; margin-top: 4px;">${formatBytes(health.disk.ha_vm_used_bytes || 0)} used / ${formatBytes(health.disk.ha_vm_total_bytes)} allocated</div>
+            </div>
+            ` : ''}
+            ${health.load_average ? `
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 20px; padding-top: 16px; border-top: 1px solid #333;">
+              <div style="text-align: center;">
+                <div style="font-size: 18px; font-weight: 600; color: ${health.load_average[0] > 2 ? '#ef4444' : health.load_average[0] > 1 ? '#eab308' : '#22c55e'};">${health.load_average[0]?.toFixed(2) || '-'}</div>
+                <div style="font-size: 11px; color: #666; margin-top: 2px;">Load 1m</div>
+              </div>
+              <div style="text-align: center;">
+                <div style="font-size: 18px; font-weight: 600; color: ${health.load_average[1] > 2 ? '#ef4444' : health.load_average[1] > 1 ? '#eab308' : '#22c55e'};">${health.load_average[1]?.toFixed(2) || '-'}</div>
+                <div style="font-size: 11px; color: #666; margin-top: 2px;">Load 5m</div>
+              </div>
+              <div style="text-align: center;">
+                <div style="font-size: 18px; font-weight: 600; color: ${health.load_average[2] > 2 ? '#ef4444' : health.load_average[2] > 1 ? '#eab308' : '#22c55e'};">${health.load_average[2]?.toFixed(2) || '-'}</div>
+                <div style="font-size: 11px; color: #666; margin-top: 2px;">Load 15m</div>
+              </div>
+            </div>
+            ` : ''}
           </div>
-          
+
           <div class="card">
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <h3>Logs</h3>
@@ -1473,22 +1519,68 @@ app.get('/installations/:id', requireAuth, async (req, res) => {
           </div>
           
           <div class="card">
-            <h3>System</h3>
+            <h3>System Info</h3>
             <div style="margin-top: 16px; font-size: 13px;">
               <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
                 <span style="color: #666;">Host IP</span>
-                <span>${health.network?.host_ip || 'Unknown'}</span>
+                <span style="font-family: monospace;">${health.network?.host_ip || 'Unknown'}</span>
               </div>
+              ${health.home_assistant?.ip_address ? `
+              <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
+                <span style="color: #666;">HA VM IP</span>
+                <span style="font-family: monospace;">${health.home_assistant.ip_address}</span>
+              </div>
+              ` : ''}
               <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
                 <span style="color: #666;">Architecture</span>
                 <span>${installation.architecture || 'x86_64'}</span>
               </div>
-              <div style="display: flex; justify-content: space-between; padding: 8px 0;">
-                <span style="color: #666;">NixOS</span>
+              <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
+                <span style="color: #666;">NixOS Version</span>
                 <span>${health.system?.nixos_version || installation.nixos_version || 'Unknown'}</span>
+              </div>
+              ${health.system?.current_generation ? `
+              <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
+                <span style="color: #666;">NixOS Generation</span>
+                <span>${health.system.current_generation}</span>
+              </div>
+              ` : ''}
+              ${health.system?.flake_rev ? `
+              <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
+                <span style="color: #666;">Flake Revision</span>
+                <span style="font-family: monospace; font-size: 11px;">${health.system.flake_rev.slice(0, 12)}</span>
+              </div>
+              ` : ''}
+              <div style="display: flex; justify-content: space-between; padding: 8px 0;">
+                <span style="color: #666;">Install ID</span>
+                <span style="font-family: monospace; font-size: 11px;">${installation.install_id.slice(0, 16)}...</span>
               </div>
             </div>
           </div>
+
+          ${health.updates ? `
+          <div class="card">
+            <h3>Updates</h3>
+            <div style="margin-top: 16px; font-size: 13px;">
+              <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
+                <span style="color: #666;">Last Check</span>
+                <span>${health.updates.last_check ? timeAgo(health.updates.last_check) : 'Never'}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #333;">
+                <span style="color: #666;">Check Result</span>
+                <span class="badge ${health.updates.last_check_result === 'success' || health.updates.last_check_result === 'no_updates' ? 'online' : health.updates.last_check_result === 'unknown' ? 'unknown' : 'offline'}" style="padding: 2px 8px; font-size: 11px;">
+                  ${health.updates.last_check_result || 'Unknown'}
+                </span>
+              </div>
+              ${health.updates.last_rebuild ? `
+              <div style="display: flex; justify-content: space-between; padding: 8px 0;">
+                <span style="color: #666;">Last Rebuild</span>
+                <span>${timeAgo(health.updates.last_rebuild)}</span>
+              </div>
+              ` : ''}
+            </div>
+          </div>
+          ` : ''}
         </div>
       </div>
     `, req.user));

@@ -1593,31 +1593,59 @@ GET  /api/v1/incidents/:id
 
 ## Summary: What Each Phase Delivers
 
-### **Phase 1** ✅
-- Working log reporting
-- Accurate status detection
-- Role system foundation
-- Basic access control
+### **Phase 1** ✅ COMPLETED (December 2024)
+- ✅ Status detection fix - increased timeout from 10 to 15 minutes
+- ✅ Added "unknown" status for devices that never reported
+- ✅ Added `getDeviceStatus()` helper with proper date validation
+- ✅ Role system database migration (`002_add_role_system.sql`)
+  - Created `installation_users` join table for many-to-many roles
+  - Added `is_admin` boolean flag to users table
+  - Roles: `home_owner`, `installer` (per-installation), `admin` (global)
+- ✅ Added `requireRole()` middleware with role hierarchy
+- ✅ Health reporter interval changed to 5 minutes for near real-time updates
 
-### **Phase 2** ✅
-- Full role-based access
-- Installer workflow
-- Admin tools
-- User management
+### **Phase 2** ✅ COMPLETED (December 2024)
+- ✅ Professional badge/status styling with rgba backgrounds and borders
+- ✅ Admin can see ALL installations via `db.findAllInstallations()`
+- ✅ Admin stats header on installations page (Total/Online/Claimed)
+- ✅ Admin Dashboard (`/admin` route) with:
+  - 6 stat cards (Total, Online, Offline, Claimed, Unclaimed, Never Reported)
+  - Recent activity list (last 5 devices)
+- ✅ Enhanced Settings page with:
+  - Account overview with avatar and role badge
+  - My Devices/Online stats
+  - Role & Permissions section
+  - Debug info (admin only)
+- ✅ Role-based navigation (admins see Dashboard, All Installations)
+- ✅ Installation detail page updated:
+  - Home Assistant card with device/integration counts
+  - Separate Remote Access card
+  - HAOS version display
 
-### **Phase 3** ✅
-- Comprehensive hardware stats
-- Home Assistant statistics (devices, integrations, entities)
-- Enhanced health metrics
-- Performance monitoring
+### **Phase 3** ✅ COMPLETED (December 2024)
+- ✅ Enhanced System Resources card with:
+  - Memory usage with progress bar
+  - Root disk usage with progress bar
+  - HA VM disk usage (when available)
+  - Load averages (1m, 5m, 15m) with color-coded thresholds
+- ✅ Enhanced System Info card with:
+  - Host IP and HA VM IP
+  - Architecture, NixOS version, generation
+  - Flake revision (truncated)
+  - Install ID display
+- ✅ New Updates card with:
+  - Last update check time
+  - Check result (success/no_updates/error)
+  - Last rebuild time
+- ✅ Purple progress bar for HA VM disk
 
-### **Phase 4** ✅
-- Professional UI (Tailwind)
-- Modern badges and components
-- Enhanced dashboard layout
-- Timeline improvements
+### **Phase 4** ✅ COMPLETED (December 2024)
+- ✅ Tailwind CSS added via CDN
+- ✅ Dark mode configuration
+- ✅ Custom Kaliun color palette (blue, dark, card, border)
+- ✅ Professional badge styling already done in Phase 2
 
-### **Phase 5** ✅
+### **Phase 5** 🔲 NOT STARTED
 - Subscription management
 - Incident tracking
 - Usage monitoring
@@ -1844,15 +1872,28 @@ GET  /api/v1/incidents/:id
 
 ## Notes
 
-- **Current codebase has NO role system** - this is a major architectural gap
+### ✅ RESOLVED (December 2024)
+- ~~Current codebase has NO role system~~ → **FIXED**: Added `installation_users` table with roles + `is_admin` flag on users
+- ~~Status detection is fragile - 10-minute timeout~~ → **FIXED**: Increased to 15 minutes, added "unknown" status, proper date validation
+- ~~No admin tools~~ → **FIXED**: Admin dashboard at `/admin`, admins see all installations
+- ~~Badges look unprofessional~~ → **FIXED**: Professional styling with rgba backgrounds and borders
+- ~~No HA device/integration display~~ → **FIXED**: Device and integration counts shown on installation detail page
+- ~~UI is basic/inline CSS~~ → **FIXED**: Tailwind CSS added via CDN with dark mode and custom colors
+- ~~No comprehensive hardware stats~~ → **FIXED**: Load averages, HA VM disk, NixOS generation, flake revision
+- ~~No update status display~~ → **FIXED**: Updates card with last check/rebuild info
+
+### 🔲 STILL TODO
 - **Log reporting has multiple failure points** - needs comprehensive debugging
-- **Status detection is fragile** - 10-minute timeout with no retry mechanism
-- **No installer workflow** - installers can't manage multiple customers
-- **No admin tools** - can't manage users or view system-wide data
-- **UI is basic/inline CSS** - needs professional framework (Tailwind recommended)
-- **Missing subscription system** - no billing/plan management
-- **Missing incident tracking** - no way to track and resolve issues
-- **Badges look unprofessional** - need modern styling
+- **No installer workflow** - installers can't manage multiple customers (role exists but no UI)
+- **Missing subscription system** - no billing/plan management (Phase 5)
+- **Missing incident tracking** - no way to track and resolve issues (Phase 5)
+
+### Database Migrations to Run
+To enable admin features, run in pgAdmin:
+```sql
+-- Run migration 002_add_role_system.sql first, then:
+UPDATE public.users SET is_admin = true WHERE email = 'your-admin-email@example.com';
+```
 
 This architecture document should be reviewed and approved before implementation begins.
 
